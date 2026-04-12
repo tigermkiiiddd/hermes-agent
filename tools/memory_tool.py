@@ -74,7 +74,7 @@ MEMORY_DIR = get_memory_dir()
 ENTRY_DELIMITER = "\n§\n"
 
 # Partition constants
-BUILTIN_PARTITIONS = {"environment", "projects", "tools", "workflows"}
+BUILTIN_PARTITIONS = {"environment", "programming", "game-dev", "fiction-writing"}
 PARTITION_CHAR_LIMIT = 1500  # per partition
 VALID_PARTITION_RE = re.compile(r'^[a-z][a-z0-9_-]{0,31}$')  # lowercase, starts with letter
 

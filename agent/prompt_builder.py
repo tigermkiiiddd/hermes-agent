@@ -152,7 +152,16 @@ MEMORY_GUIDANCE = (
     "Do NOT save task progress, session outcomes, completed-work logs, or temporary TODO "
     "state to memory; use session_search to recall those from past transcripts. "
     "If you've discovered a new way to do something, solved a problem that could be "
-    "necessary later, save it as a skill with the skill tool."
+    "necessary later, save it as a skill with the skill tool.\n\n"
+    "## Memory Partition Routing\n"
+    "When saving to memory (target='memory'), auto-select the best partition:\n"
+    "- partition='environment': OS, hardware, paths, installed software, network config\n"
+    "- partition='programming': languages, frameworks, code patterns, build tools, debugging conventions\n"
+    "- partition='game-dev': game engines, assets, mechanics, shaders, level design, game-specific tools\n"
+    "- partition='fiction-writing': story structure, characters, world-building, writing style, narrative techniques\n"
+    "- No partition (omit): general facts, cross-domain info, or unclear category\n"
+    "All partitions are loaded together — reading is always global. "
+    "Pick the single most relevant partition for writing. When in doubt, use default (no partition)."
 )
 
 SESSION_SEARCH_GUIDANCE = (
