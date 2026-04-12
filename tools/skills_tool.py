@@ -100,6 +100,33 @@ _PLATFORM_MAP = {
 }
 _ENV_VAR_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _EXCLUDED_SKILL_DIRS = frozenset((".git", ".github", ".hub"))
+
+
+def _rglob_skills(scan_dir: Path) -> list[Path]:
+    """Find all SKILL.md files under *scan_dir*, including symlinked subdirs.
+
+    On macOS, ``Path.rglob()`` does not descend into symlinked directories,
+    which breaks plugin-installed skills that are symlinked into the skills
+    directory.  This helper explicitly follows top-level symlinks.
+    """
+    seen: set[Path] = set()
+    results: list[Path] = []
+
+    for p in scan_dir.rglob("SKILL.md"):
+        seen.add(p.resolve())
+        results.append(p)
+
+    # Also scan top-level symlinked subdirectories that rglob skipped
+    if scan_dir.is_dir():
+        for child in scan_dir.iterdir():
+            if child.is_symlink() and child.is_dir():
+                for p in child.rglob("SKILL.md"):
+                    resolved = p.resolve()
+                    if resolved not in seen:
+                        seen.add(resolved)
+                        results.append(p)
+
+    return results
 _REMOTE_ENV_BACKENDS = frozenset({"docker", "singularity", "modal", "ssh", "daytona"})
 _secret_capture_callback = None
 
@@ -550,7 +577,7 @@ def _find_all_skills(*, skip_disabled: bool = False) -> List[Dict[str, Any]]:
     dirs_to_scan.extend(get_external_skills_dirs())
 
     for scan_dir in dirs_to_scan:
-        for skill_md in scan_dir.rglob("SKILL.md"):
+        for skill_md in _rglob_skills(scan_dir):
             if any(part in _EXCLUDED_SKILL_DIRS for part in skill_md.parts):
                 continue
 
@@ -642,6 +669,85 @@ def _load_category_description(category_dir: Path) -> Optional[str]:
             "Error parsing category description %s: %s", desc_file, e, exc_info=True
         )
         return None
+
+
+def skills_categories(verbose: bool = False, task_id: str = None) -> str:
+    """
+    List available skill categories with descriptions (progressive disclosure tier 0).
+
+    Returns category names and descriptions for efficient discovery before drilling down.
+    Categories can have a DESCRIPTION.md file with a description frontmatter field
+    or first paragraph to explain what skills are in that category.
+
+    Args:
+        verbose: If True, include skill counts per category (default: False, but currently always included)
+        task_id: Optional task identifier used to probe the active backend
+
+    Returns:
+        JSON string with list of categories and their descriptions
+    """
+    try:
+        # Use module-level SKILLS_DIR (respects monkeypatching) + external dirs
+        all_dirs = [SKILLS_DIR] if SKILLS_DIR.exists() else []
+        try:
+            from agent.skill_utils import get_external_skills_dirs
+            all_dirs.extend(d for d in get_external_skills_dirs() if d.exists())
+        except Exception:
+            pass
+        if not all_dirs:
+            return json.dumps(
+                {
+                    "success": True,
+                    "categories": [],
+                    "message": "No skills directory found.",
+                },
+                ensure_ascii=False,
+            )
+
+        category_dirs = {}
+        category_counts: Dict[str, int] = {}
+        for scan_dir in all_dirs:
+            for skill_md in _rglob_skills(scan_dir):
+                if any(part in _EXCLUDED_SKILL_DIRS for part in skill_md.parts):
+                    continue
+
+                try:
+                    frontmatter, _ = _parse_frontmatter(
+                        skill_md.read_text(encoding="utf-8")[:4000]
+                    )
+                except Exception:
+                    frontmatter = {}
+
+                if not skill_matches_platform(frontmatter):
+                    continue
+
+                category = _get_category_from_path(skill_md)
+                if category:
+                    category_counts[category] = category_counts.get(category, 0) + 1
+                    if category not in category_dirs:
+                        category_dirs[category] = skill_md.parent.parent
+
+        categories = []
+        for name in sorted(category_dirs.keys()):
+            category_dir = category_dirs[name]
+            description = _load_category_description(category_dir)
+
+            cat_entry = {"name": name, "skill_count": category_counts[name]}
+            if description:
+                cat_entry["description"] = description
+            categories.append(cat_entry)
+
+        return json.dumps(
+            {
+                "success": True,
+                "categories": categories,
+                "hint": "If a category is relevant to your task, use skills_list with that category to see available skills",
+            },
+            ensure_ascii=False,
+        )
+
+    except Exception as e:
+        return tool_error(str(e), success=False)
 
 
 def skills_list(category: str = None, task_id: str = None) -> str:
@@ -907,7 +1013,7 @@ def skill_view(name: str, file_path: str = None, task_id: str = None) -> str:
         # Search by directory name across all dirs
         if not skill_md:
             for search_dir in all_dirs:
-                for found_skill_md in search_dir.rglob("SKILL.md"):
+                for found_skill_md in _rglob_skills(search_dir):
                     if found_skill_md.parent.name == name:
                         skill_dir = found_skill_md.parent
                         skill_md = found_skill_md
@@ -950,11 +1056,17 @@ def skill_view(name: str, file_path: str = None, task_id: str = None) -> str:
             )
 
         # Security: warn if skill is loaded from outside trusted directories
-        # (local skills dir + configured external_dirs are all trusted)
+        # (local skills dir + configured external_dirs + plugins dir are all trusted)
         _outside_skills_dir = True
         _trusted_dirs = [SKILLS_DIR.resolve()]
         try:
             _trusted_dirs.extend(d.resolve() for d in all_dirs[1:])
+        except Exception:
+            pass
+        # Also trust skills installed via hermes plugins install (symlinked from plugins dir)
+        try:
+            from hermes_constants import get_hermes_home
+            _trusted_dirs.append((get_hermes_home() / "plugins").resolve())
         except Exception:
             pass
         for _td in _trusted_dirs:

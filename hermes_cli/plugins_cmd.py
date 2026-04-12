@@ -224,6 +224,76 @@ def _prompt_plugin_env_vars(manifest: dict, console) -> None:
     console.print()
 
 
+def _link_plugin_skills(plugin_dir: Path, console) -> list[str]:
+    """Detect Claude-style skill dirs inside a plugin and symlink to ~/.hermes/skills/.
+
+    A Claude-style plugin has subdirectories each containing a SKILL.md (no
+    top-level plugin.yaml).  We create symlinks so the skills appear in
+    ``skills_list`` / ``skill_view`` transparently.
+
+    Returns list of linked skill names.
+    """
+    skills_dir = get_hermes_home() / "skills"
+    skills_dir.mkdir(parents=True, exist_ok=True)
+
+    linked: list[str] = []
+
+    # Only activate for repos that have NO plugin.yaml (Claude-style)
+    if (plugin_dir / "plugin.yaml").exists():
+        return linked
+
+    for child in sorted(plugin_dir.iterdir()):
+        if not child.is_dir() or child.name.startswith((".", "_")):
+            continue
+        if (child / "SKILL.md").exists():
+            link_path = skills_dir / child.name
+            # Remove stale symlink or directory if it's already a symlink
+            if link_path.is_symlink():
+                link_path.unlink()
+            elif link_path.exists():
+                # Real dir with same name — skip, don't overwrite user's own skill
+                continue
+            try:
+                link_path.symlink_to(child)
+                linked.append(child.name)
+                console.print(f"  [green]✓[/green] Linked skill: {child.name}")
+            except OSError as e:
+                console.print(f"  [yellow]⚠[/yellow] Failed to link {child.name}: {e}")
+
+    return linked
+
+
+def _unlink_plugin_skills(plugin_dir: Path, console) -> list[str]:
+    """Remove symlinks in ~/.hermes/skills/ that point into *plugin_dir*.
+
+    Called by ``cmd_remove`` so skills disappear when the plugin is uninstalled.
+    """
+    skills_dir = get_hermes_home() / "skills"
+    if not skills_dir.exists():
+        return []
+
+    removed: list[str] = []
+    plugin_resolved = plugin_dir.resolve()
+
+    for link in sorted(skills_dir.iterdir()):
+        if not link.is_symlink():
+            continue
+        try:
+            target = link.resolve()
+            # Check if the symlink target is inside the plugin dir
+            try:
+                target.relative_to(plugin_resolved)
+            except ValueError:
+                continue
+            link.unlink()
+            removed.append(link.name)
+            console.print(f"  [dim]Unlinked skill: {link.name}[/dim]")
+        except OSError:
+            pass
+
+    return removed
+
+
 def _display_after_install(plugin_dir: Path, identifier: str) -> None:
     """Show after-install.md if it exists, otherwise a default message."""
     from rich.console import Console
@@ -389,7 +459,13 @@ def cmd_install(identifier: str, force: bool = False) -> None:
     # Prompt for required environment variables before showing after-install docs
     _prompt_plugin_env_vars(installed_manifest, console)
 
+    # Auto-link Claude-style skills (SKILL.md dirs inside the plugin)
+    linked_skills = _link_plugin_skills(target, console)
+
     _display_after_install(target, identifier)
+
+    if linked_skills:
+        console.print(f"[dim]  {len(linked_skills)} skill(s) auto-linked: {', '.join(linked_skills)}[/dim]")
 
     console.print("[dim]Restart the gateway for the plugin to take effect:[/dim]")
     console.print("[dim]  hermes gateway restart[/dim]")
@@ -462,6 +538,9 @@ def cmd_remove(name: str) -> None:
     except ValueError as e:
         console.print(f"[red]Error:[/red] {e}")
         sys.exit(1)
+
+    # Unlink Claude-style skills before removing the plugin dir
+    _unlink_plugin_skills(target, console)
 
     shutil.rmtree(target)
     _display_removed(name, plugins_dir)

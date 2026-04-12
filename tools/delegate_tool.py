@@ -110,24 +110,34 @@ def _build_child_system_prompt(
         )
 
     # Inject skill content directly into prompt (saves child tool calls)
+    # Scans: ~/.hermes/skills/ (Hermes native) then ~/.agents/skills/ (Claude Code compatible)
     if skills:
         from pathlib import Path as _P
-        _skills_dir = _P(os.path.expanduser("~/.hermes/skills"))
+        _skills_dirs = [
+            _P(os.path.expanduser("~/.hermes/skills")),
+            _P(os.path.expanduser("~/.agents/skills")),   # Claude Code skills compat
+        ]
         _loaded = []
         for _sname in skills:
             _found = None
-            # Try category/name, then flat name
-            for _candidate in [_skills_dir / _sname / "SKILL.md",
-                               _skills_dir / f"{_sname}.md"]:
-                if _candidate.exists():
-                    _found = _candidate
+            for _skills_dir in _skills_dirs:
+                if not _skills_dir.is_dir():
+                    continue
+                # Try category/name, then flat name
+                for _candidate in [_skills_dir / _sname / "SKILL.md",
+                                   _skills_dir / f"{_sname}.md"]:
+                    if _candidate.exists():
+                        _found = _candidate
+                        break
+                if _found:
                     break
-            if not _found:
-                # Search by directory name
+                # Search by directory name (handles category/name like game-dev/ascii-art)
                 for _md in _skills_dir.rglob("SKILL.md"):
                     if _md.parent.name == _sname:
                         _found = _md
                         break
+                if _found:
+                    break
             if _found and _found.exists():
                 try:
                     _content = _found.read_text(encoding="utf-8")
