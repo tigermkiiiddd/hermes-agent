@@ -92,6 +92,7 @@ def _build_child_system_prompt(
     context: Optional[str] = None,
     *,
     workspace_path: Optional[str] = None,
+    skills: Optional[List[str]] = None,
 ) -> str:
     """Build a focused system prompt for a child agent."""
     parts = [
@@ -107,6 +108,34 @@ def _build_child_system_prompt(
             f"{workspace_path}\n"
             "Use this exact path for local repository/workdir operations unless the task explicitly says otherwise."
         )
+
+    # Inject skill content directly into prompt (saves child tool calls)
+    if skills:
+        from pathlib import Path as _P
+        _skills_dir = _P(os.path.expanduser("~/.hermes/skills"))
+        _loaded = []
+        for _sname in skills:
+            _found = None
+            # Try category/name, then flat name
+            for _candidate in [_skills_dir / _sname / "SKILL.md",
+                               _skills_dir / f"{_sname}.md"]:
+                if _candidate.exists():
+                    _found = _candidate
+                    break
+            if not _found:
+                # Search by directory name
+                for _md in _skills_dir.rglob("SKILL.md"):
+                    if _md.parent.name == _sname:
+                        _found = _md
+                        break
+            if _found and _found.exists():
+                try:
+                    _content = _found.read_text(encoding="utf-8")
+                    _loaded.append(f"## Skill: {_sname}\n{_content}")
+                except Exception:
+                    pass
+        if _loaded:
+            parts.append("\nLOADED SKILLS (follow these instructions):\n" + "\n\n".join(_loaded))
     parts.append(
         "\nComplete this task using the tools available to you. "
         "When finished, provide a clear, concise summary of:\n"
@@ -251,6 +280,8 @@ def _build_child_agent(
     # ACP transport overrides — lets a non-ACP parent spawn ACP child agents
     override_acp_command: Optional[str] = None,
     override_acp_args: Optional[List[str]] = None,
+    # Skills to inject into child prompt
+    skills: Optional[List[str]] = None,
 ):
     """
     Build a child AIAgent on the main thread (thread-safe construction).
@@ -291,7 +322,7 @@ def _build_child_agent(
         child_toolsets = _strip_blocked_tools(DEFAULT_TOOLSETS)
 
     workspace_hint = _resolve_workspace_hint(parent_agent)
-    child_prompt = _build_child_system_prompt(goal, context, workspace_path=workspace_hint)
+    child_prompt = _build_child_system_prompt(goal, context, workspace_path=workspace_hint, skills=skills)
     # Extract parent's API key so subagents inherit auth (e.g. Nous Portal).
     parent_api_key = getattr(parent_agent, "api_key", None)
     if (not parent_api_key) and hasattr(parent_agent, "_client_kwargs"):
@@ -626,6 +657,7 @@ def delegate_task(
     toolsets: Optional[List[str]] = None,
     tasks: Optional[List[Dict[str, Any]]] = None,
     max_iterations: Optional[int] = None,
+    skills: Optional[List[str]] = None,
     acp_command: Optional[str] = None,
     acp_args: Optional[List[str]] = None,
     parent_agent=None,
@@ -634,8 +666,12 @@ def delegate_task(
     Spawn one or more child agents to handle delegated tasks.
 
     Supports two modes:
-      - Single: provide goal (+ optional context, toolsets)
-      - Batch:  provide tasks array [{goal, context, toolsets}, ...]
+      - Single: provide goal (+ optional context, toolsets, skills)
+      - Batch:  provide tasks array [{goal, context, toolsets, skills}, ...]
+
+    Skills are skill names (e.g. ["game-dev", "fiction-writing"]) whose content
+    is loaded from ~/.hermes/skills/ and injected into the child's system prompt,
+    saving the child from needing an extra tool call.
 
     Returns JSON with results array, one entry per task.
     """
@@ -720,6 +756,7 @@ def delegate_task(
                 override_api_mode=creds["api_mode"],
                 override_acp_command=t.get("acp_command") or acp_command,
                 override_acp_args=t.get("acp_args") or acp_args,
+                skills=t.get("skills") or skills,
             )
             # Override with correct parent tool names (before child construction mutated global)
             child._delegate_saved_tool_names = _parent_tool_names
@@ -1019,6 +1056,16 @@ DELEGATE_TASK_SCHEMA = {
                     "['terminal', 'file', 'web'] for full-stack tasks."
                 ),
             },
+            "skills": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": (
+                    "Skill names to load into the subagent's system prompt. "
+                    "Content is read from ~/.hermes/skills/ and injected "
+                    "directly, saving the child from needing a tool call. "
+                    "Example: ['game-dev', 'fiction-writing']."
+                ),
+            },
             "tasks": {
                 "type": "array",
                 "items": {
@@ -1039,6 +1086,11 @@ DELEGATE_TASK_SCHEMA = {
                             "type": "array",
                             "items": {"type": "string"},
                             "description": "Per-task ACP args override.",
+                        },
+                        "skills": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Per-task skill names to inject. Overrides top-level skills for this task.",
                         },
                     },
                     "required": ["goal"],
@@ -1095,6 +1147,7 @@ registry.register(
         toolsets=args.get("toolsets"),
         tasks=args.get("tasks"),
         max_iterations=args.get("max_iterations"),
+        skills=args.get("skills"),
         acp_command=args.get("acp_command"),
         acp_args=args.get("acp_args"),
         parent_agent=kw.get("parent_agent")),
