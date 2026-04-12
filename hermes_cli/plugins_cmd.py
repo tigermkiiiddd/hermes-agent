@@ -228,8 +228,9 @@ def _link_plugin_skills(plugin_dir: Path, console) -> list[str]:
     """Detect Claude-style skill dirs inside a plugin and symlink to ~/.hermes/skills/.
 
     A Claude-style plugin has subdirectories each containing a SKILL.md (no
-    top-level plugin.yaml).  We create symlinks so the skills appear in
-    ``skills_list`` / ``skill_view`` transparently.
+    top-level plugin.yaml).  We create symlinks under
+    ``~/.hermes/skills/<plugin-name>/<skill-name>/`` so they get a proper
+    category derived from the plugin name.
 
     Returns list of linked skill names.
     """
@@ -242,11 +243,15 @@ def _link_plugin_skills(plugin_dir: Path, console) -> list[str]:
     if (plugin_dir / "plugin.yaml").exists():
         return linked
 
+    # Use plugin dir name as the category subdirectory
+    category_dir = skills_dir / plugin_dir.name
+    category_dir.mkdir(parents=True, exist_ok=True)
+
     for child in sorted(plugin_dir.iterdir()):
         if not child.is_dir() or child.name.startswith((".", "_")):
             continue
         if (child / "SKILL.md").exists():
-            link_path = skills_dir / child.name
+            link_path = category_dir / child.name
             # Remove stale symlink or directory if it's already a symlink
             if link_path.is_symlink():
                 link_path.unlink()
@@ -256,7 +261,7 @@ def _link_plugin_skills(plugin_dir: Path, console) -> list[str]:
             try:
                 link_path.symlink_to(child)
                 linked.append(child.name)
-                console.print(f"  [green]✓[/green] Linked skill: {child.name}")
+                console.print(f"  [green]✓[/green] Linked skill: {plugin_dir.name}/{child.name}")
             except OSError as e:
                 console.print(f"  [yellow]⚠[/yellow] Failed to link {child.name}: {e}")
 

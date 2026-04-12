@@ -107,25 +107,33 @@ def _rglob_skills(scan_dir: Path) -> list[Path]:
 
     On macOS, ``Path.rglob()`` does not descend into symlinked directories,
     which breaks plugin-installed skills that are symlinked into the skills
-    directory.  This helper explicitly follows top-level symlinks.
+    directory.  This helper explicitly follows symlinked subdirectories
+    recursively.
     """
     seen: set[Path] = set()
     results: list[Path] = []
 
-    for p in scan_dir.rglob("SKILL.md"):
-        seen.add(p.resolve())
-        results.append(p)
+    def _scan(directory: Path) -> None:
+        try:
+            entries = list(directory.iterdir())
+        except OSError:
+            return
+        for entry in entries:
+            if not entry.is_dir():
+                continue
+            # Skip excluded dirs
+            if entry.name in _EXCLUDED_SKILL_DIRS:
+                continue
+            skill_md = entry / "SKILL.md"
+            if skill_md.exists():
+                resolved = skill_md.resolve()
+                if resolved not in seen:
+                    seen.add(resolved)
+                    results.append(skill_md)
+            # Recurse (handles both real and symlinked directories)
+            _scan(entry)
 
-    # Also scan top-level symlinked subdirectories that rglob skipped
-    if scan_dir.is_dir():
-        for child in scan_dir.iterdir():
-            if child.is_symlink() and child.is_dir():
-                for p in child.rglob("SKILL.md"):
-                    resolved = p.resolve()
-                    if resolved not in seen:
-                        seen.add(resolved)
-                        results.append(p)
-
+    _scan(scan_dir)
     return results
 _REMOTE_ENV_BACKENDS = frozenset({"docker", "singularity", "modal", "ssh", "daytona"})
 _secret_capture_callback = None
