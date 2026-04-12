@@ -1,12 +1,19 @@
 #!/usr/bin/env python3
 """
-Memory Tool Module - Persistent Curated Memory
+Memory Tool Module - Persistent Curated Memory with Partitions
 
-Provides bounded, file-backed memory that persists across sessions. Two stores:
-  - MEMORY.md: agent's personal notes and observations (environment facts, project
-    conventions, tool quirks, things learned)
-  - USER.md: what the agent knows about the user (preferences, communication style,
-    expectations, workflow habits)
+Provides bounded, file-backed memory that persists across sessions.
+
+Two primary stores:
+  - MEMORY.md (or partition files): agent's personal notes and observations
+  - USER.md: what the agent knows about the user
+
+Memory supports **partitions** — topic-scoped sub-stores under
+~/.hermes/memories/partitions/<topic>.md.  Built-in topics: environment,
+projects, tools, workflows.  Users can create custom partitions too.
+
+When partition is not specified, the legacy MEMORY.md is used (backward compat).
+When partition is specified, the partition file is used instead.
 
 Both are injected into the system prompt as a frozen snapshot at session start.
 Mid-session writes update files on disk immediately (durable) but do NOT change
@@ -17,7 +24,8 @@ Entry delimiter: § (section sign). Entries can be multiline.
 Character limits (not tokens) because char counts are model-independent.
 
 Design:
-- Single `memory` tool with action parameter: add, replace, remove, read
+- Single `memory` tool with action parameter: add, replace, remove
+- Optional `partition` parameter for topic-scoped memory
 - replace/remove use short unique substring matching (not full text or IDs)
 - Behavioral guidance lives in the tool schema description
 - Frozen snapshot pattern: system prompt is stable, tool responses show live state
@@ -54,7 +62,21 @@ def get_memory_dir() -> Path:
     """Return the profile-scoped memories directory."""
     return get_hermes_home() / "memories"
 
+def get_partitions_dir() -> Path:
+    """Return the partitions subdirectory."""
+    return get_memory_dir() / "partitions"
+
+# Backward-compatible alias — gateway/run.py imports this at runtime inside
+# a function body, so it gets the correct snapshot for that process.  New code
+# should prefer get_memory_dir().
+MEMORY_DIR = get_memory_dir()
+
 ENTRY_DELIMITER = "\n§\n"
+
+# Partition constants
+BUILTIN_PARTITIONS = {"environment", "projects", "tools", "workflows"}
+PARTITION_CHAR_LIMIT = 1500  # per partition
+VALID_PARTITION_RE = re.compile(r'^[a-z][a-z0-9_-]{0,31}$')  # lowercase, starts with letter
 
 
 # ---------------------------------------------------------------------------
@@ -109,20 +131,26 @@ class MemoryStore:
     Maintains two parallel states:
       - _system_prompt_snapshot: frozen at load time, used for system prompt injection.
         Never mutated mid-session. Keeps prefix cache stable.
-      - memory_entries / user_entries: live state, mutated by tool calls, persisted to disk.
-        Tool responses always reflect this live state.
+      - memory_entries / user_entries / partition_entries: live state, mutated by tool
+        calls, persisted to disk. Tool responses always reflect this live state.
+
+    Supports partitions: topic-scoped sub-stores under memories/partitions/<topic>.md
     """
 
-    def __init__(self, memory_char_limit: int = 2200, user_char_limit: int = 1375):
+    def __init__(self, memory_char_limit: int = 2200, user_char_limit: int = 1375,
+                 partition_char_limit: int = PARTITION_CHAR_LIMIT):
         self.memory_entries: List[str] = []
         self.user_entries: List[str] = []
+        self.partition_entries: Dict[str, List[str]] = {}  # topic -> entries
         self.memory_char_limit = memory_char_limit
         self.user_char_limit = user_char_limit
+        self.partition_char_limit = partition_char_limit
         # Frozen snapshot for system prompt -- set once at load_from_disk()
         self._system_prompt_snapshot: Dict[str, str] = {"memory": "", "user": ""}
+        self._partition_snapshot: Dict[str, str] = {}  # topic -> rendered block
 
     def load_from_disk(self):
-        """Load entries from MEMORY.md and USER.md, capture system prompt snapshot."""
+        """Load entries from MEMORY.md, USER.md, and partition files. Capture system prompt snapshot."""
         mem_dir = get_memory_dir()
         mem_dir.mkdir(parents=True, exist_ok=True)
 
@@ -133,11 +161,28 @@ class MemoryStore:
         self.memory_entries = list(dict.fromkeys(self.memory_entries))
         self.user_entries = list(dict.fromkeys(self.user_entries))
 
+        # Load all partition files
+        part_dir = get_partitions_dir()
+        part_dir.mkdir(parents=True, exist_ok=True)
+        self.partition_entries = {}
+        for pf in sorted(part_dir.glob("*.md")):
+            topic = pf.stem
+            entries = self._read_file(pf)
+            entries = list(dict.fromkeys(entries))
+            if entries:
+                self.partition_entries[topic] = entries
+
         # Capture frozen snapshot for system prompt injection
         self._system_prompt_snapshot = {
             "memory": self._render_block("memory", self.memory_entries),
             "user": self._render_block("user", self.user_entries),
         }
+        # Capture partition snapshots
+        self._partition_snapshot = {}
+        for topic, entries in self.partition_entries.items():
+            block = self._render_block(topic, entries, is_partition=True)
+            if block:
+                self._partition_snapshot[topic] = block
 
     @staticmethod
     @contextmanager
@@ -177,80 +222,104 @@ class MemoryStore:
             fd.close()
 
     @staticmethod
-    def _path_for(target: str) -> Path:
+    def _path_for(target: str, partition: str = None) -> Path:
         mem_dir = get_memory_dir()
         if target == "user":
             return mem_dir / "USER.md"
+        if partition:
+            return get_partitions_dir() / f"{partition}.md"
         return mem_dir / "MEMORY.md"
 
-    def _reload_target(self, target: str):
+    def _reload_target(self, target: str, partition: str = None):
         """Re-read entries from disk into in-memory state.
 
         Called under file lock to get the latest state before mutating.
         """
-        fresh = self._read_file(self._path_for(target))
+        fresh = self._read_file(self._path_for(target, partition))
         fresh = list(dict.fromkeys(fresh))  # deduplicate
-        self._set_entries(target, fresh)
+        self._set_entries(target, fresh, partition)
 
-    def save_to_disk(self, target: str):
+    def save_to_disk(self, target: str, partition: str = None):
         """Persist entries to the appropriate file. Called after every mutation."""
-        get_memory_dir().mkdir(parents=True, exist_ok=True)
-        self._write_file(self._path_for(target), self._entries_for(target))
+        if partition:
+            get_partitions_dir().mkdir(parents=True, exist_ok=True)
+        else:
+            get_memory_dir().mkdir(parents=True, exist_ok=True)
+        self._write_file(self._path_for(target, partition), self._entries_for(target, partition))
 
-    def _entries_for(self, target: str) -> List[str]:
+    def _entries_for(self, target: str, partition: str = None) -> List[str]:
         if target == "user":
             return self.user_entries
+        if partition:
+            return self.partition_entries.get(partition, [])
         return self.memory_entries
 
-    def _set_entries(self, target: str, entries: List[str]):
+    def _set_entries(self, target: str, entries: List[str], partition: str = None):
         if target == "user":
             self.user_entries = entries
+        elif partition:
+            self.partition_entries[partition] = entries
         else:
             self.memory_entries = entries
 
-    def _char_count(self, target: str) -> int:
-        entries = self._entries_for(target)
+    def _char_count(self, target: str, partition: str = None) -> int:
+        entries = self._entries_for(target, partition)
         if not entries:
             return 0
         return len(ENTRY_DELIMITER.join(entries))
 
-    def _char_limit(self, target: str) -> int:
+    def _char_limit(self, target: str, partition: str = None) -> int:
         if target == "user":
             return self.user_char_limit
+        if partition:
+            return self.partition_char_limit
         return self.memory_char_limit
 
-    def add(self, target: str, content: str) -> Dict[str, Any]:
+    def _validate_partition(self, partition: str) -> Optional[str]:
+        """Validate partition name. Returns error string if invalid, None if OK."""
+        if not VALID_PARTITION_RE.match(partition):
+            return (f"Invalid partition name '{partition}'. Use lowercase letters, "
+                    f"numbers, hyphens, underscores. Must start with a letter, max 32 chars.")
+        return None
+
+    def add(self, target: str, content: str, partition: str = None) -> Dict[str, Any]:
         """Append a new entry. Returns error if it would exceed the char limit."""
         content = content.strip()
         if not content:
             return {"success": False, "error": "Content cannot be empty."}
+
+        # Validate partition name
+        if partition:
+            err = self._validate_partition(partition)
+            if err:
+                return {"success": False, "error": err}
 
         # Scan for injection/exfiltration before accepting
         scan_error = _scan_memory_content(content)
         if scan_error:
             return {"success": False, "error": scan_error}
 
-        with self._file_lock(self._path_for(target)):
+        with self._file_lock(self._path_for(target, partition)):
             # Re-read from disk under lock to pick up writes from other sessions
-            self._reload_target(target)
+            self._reload_target(target, partition)
 
-            entries = self._entries_for(target)
-            limit = self._char_limit(target)
+            entries = self._entries_for(target, partition)
+            limit = self._char_limit(target, partition)
 
             # Reject exact duplicates
             if content in entries:
-                return self._success_response(target, "Entry already exists (no duplicate added).")
+                return self._success_response(target, "Entry already exists (no duplicate added).", partition)
 
             # Calculate what the new total would be
             new_entries = entries + [content]
             new_total = len(ENTRY_DELIMITER.join(new_entries))
 
             if new_total > limit:
-                current = self._char_count(target)
+                current = self._char_count(target, partition)
                 return {
                     "success": False,
                     "error": (
-                        f"Memory at {current:,}/{limit:,} chars. "
+                        f"{'Partition' if partition else 'Memory'} at {current:,}/{limit:,} chars. "
                         f"Adding this entry ({len(content)} chars) would exceed the limit. "
                         f"Replace or remove existing entries first."
                     ),
@@ -259,12 +328,12 @@ class MemoryStore:
                 }
 
             entries.append(content)
-            self._set_entries(target, entries)
-            self.save_to_disk(target)
+            self._set_entries(target, entries, partition)
+            self.save_to_disk(target, partition)
 
-        return self._success_response(target, "Entry added.")
+        return self._success_response(target, "Entry added.", partition)
 
-    def replace(self, target: str, old_text: str, new_content: str) -> Dict[str, Any]:
+    def replace(self, target: str, old_text: str, new_content: str, partition: str = None) -> Dict[str, Any]:
         """Find entry containing old_text substring, replace it with new_content."""
         old_text = old_text.strip()
         new_content = new_content.strip()
@@ -273,15 +342,21 @@ class MemoryStore:
         if not new_content:
             return {"success": False, "error": "new_content cannot be empty. Use 'remove' to delete entries."}
 
+        # Validate partition name
+        if partition:
+            err = self._validate_partition(partition)
+            if err:
+                return {"success": False, "error": err}
+
         # Scan replacement content for injection/exfiltration
         scan_error = _scan_memory_content(new_content)
         if scan_error:
             return {"success": False, "error": scan_error}
 
-        with self._file_lock(self._path_for(target)):
-            self._reload_target(target)
+        with self._file_lock(self._path_for(target, partition)):
+            self._reload_target(target, partition)
 
-            entries = self._entries_for(target)
+            entries = self._entries_for(target, partition)
             matches = [(i, e) for i, e in enumerate(entries) if old_text in e]
 
             if not matches:
@@ -300,7 +375,7 @@ class MemoryStore:
                 # All identical -- safe to replace just the first
 
             idx = matches[0][0]
-            limit = self._char_limit(target)
+            limit = self._char_limit(target, partition)
 
             # Check that replacement doesn't blow the budget
             test_entries = entries.copy()
@@ -311,27 +386,33 @@ class MemoryStore:
                 return {
                     "success": False,
                     "error": (
-                        f"Replacement would put memory at {new_total:,}/{limit:,} chars. "
+                        f"Replacement would put {'partition' if partition else 'memory'} at {new_total:,}/{limit:,} chars. "
                         f"Shorten the new content or remove other entries first."
                     ),
                 }
 
             entries[idx] = new_content
-            self._set_entries(target, entries)
-            self.save_to_disk(target)
+            self._set_entries(target, entries, partition)
+            self.save_to_disk(target, partition)
 
-        return self._success_response(target, "Entry replaced.")
+        return self._success_response(target, "Entry replaced.", partition)
 
-    def remove(self, target: str, old_text: str) -> Dict[str, Any]:
+    def remove(self, target: str, old_text: str, partition: str = None) -> Dict[str, Any]:
         """Remove the entry containing old_text substring."""
         old_text = old_text.strip()
         if not old_text:
             return {"success": False, "error": "old_text cannot be empty."}
 
-        with self._file_lock(self._path_for(target)):
-            self._reload_target(target)
+        # Validate partition name
+        if partition:
+            err = self._validate_partition(partition)
+            if err:
+                return {"success": False, "error": err}
 
-            entries = self._entries_for(target)
+        with self._file_lock(self._path_for(target, partition)):
+            self._reload_target(target, partition)
+
+            entries = self._entries_for(target, partition)
             matches = [(i, e) for i, e in enumerate(entries) if old_text in e]
 
             if not matches:
@@ -351,10 +432,10 @@ class MemoryStore:
 
             idx = matches[0][0]
             entries.pop(idx)
-            self._set_entries(target, entries)
-            self.save_to_disk(target)
+            self._set_entries(target, entries, partition)
+            self.save_to_disk(target, partition)
 
-        return self._success_response(target, "Entry removed.")
+        return self._success_response(target, "Entry removed.", partition)
 
     def format_for_system_prompt(self, target: str) -> Optional[str]:
         """
@@ -369,12 +450,20 @@ class MemoryStore:
         block = self._system_prompt_snapshot.get(target, "")
         return block if block else None
 
+    def format_partition_for_system_prompt(self, topic: str) -> Optional[str]:
+        """Return the frozen snapshot for a partition topic."""
+        return self._partition_snapshot.get(topic)
+
+    def get_partition_topics(self) -> List[str]:
+        """Return sorted list of loaded partition topics."""
+        return sorted(self._partition_snapshot.keys())
+
     # -- Internal helpers --
 
-    def _success_response(self, target: str, message: str = None) -> Dict[str, Any]:
-        entries = self._entries_for(target)
-        current = self._char_count(target)
-        limit = self._char_limit(target)
+    def _success_response(self, target: str, message: str = None, partition: str = None) -> Dict[str, Any]:
+        entries = self._entries_for(target, partition)
+        current = self._char_count(target, partition)
+        limit = self._char_limit(target, partition)
         pct = min(100, int((current / limit) * 100)) if limit > 0 else 0
 
         resp = {
@@ -384,21 +473,31 @@ class MemoryStore:
             "usage": f"{pct}% — {current:,}/{limit:,} chars",
             "entry_count": len(entries),
         }
+        if partition:
+            resp["partition"] = partition
         if message:
             resp["message"] = message
         return resp
 
-    def _render_block(self, target: str, entries: List[str]) -> str:
+    def _render_block(self, target: str, entries: List[str], is_partition: bool = False) -> str:
         """Render a system prompt block with header and usage indicator."""
         if not entries:
             return ""
 
-        limit = self._char_limit(target)
+        if is_partition:
+            limit = self.partition_char_limit
+        elif target == "user":
+            limit = self.user_char_limit
+        else:
+            limit = self.memory_char_limit
+
         content = ENTRY_DELIMITER.join(entries)
         current = len(content)
         pct = min(100, int((current / limit) * 100)) if limit > 0 else 0
 
-        if target == "user":
+        if is_partition:
+            header = f"MEMORY PARTITION: {target} [{pct}% — {current:,}/{limit:,} chars]"
+        elif target == "user":
             header = f"USER PROFILE (who the user is) [{pct}% — {current:,}/{limit:,} chars]"
         else:
             header = f"MEMORY (your personal notes) [{pct}% — {current:,}/{limit:,} chars]"
@@ -465,6 +564,7 @@ def memory_tool(
     target: str = "memory",
     content: str = None,
     old_text: str = None,
+    partition: str = None,
     store: Optional[MemoryStore] = None,
 ) -> str:
     """
@@ -478,22 +578,26 @@ def memory_tool(
     if target not in ("memory", "user"):
         return tool_error(f"Invalid target '{target}'. Use 'memory' or 'user'.", success=False)
 
+    # partition only applies to target="memory"
+    if partition and target != "memory":
+        return tool_error("Partitions are only supported for target='memory', not 'user'.", success=False)
+
     if action == "add":
         if not content:
             return tool_error("Content is required for 'add' action.", success=False)
-        result = store.add(target, content)
+        result = store.add(target, content, partition=partition)
 
     elif action == "replace":
         if not old_text:
             return tool_error("old_text is required for 'replace' action.", success=False)
         if not content:
             return tool_error("content is required for 'replace' action.", success=False)
-        result = store.replace(target, old_text, content)
+        result = store.replace(target, old_text, content, partition=partition)
 
     elif action == "remove":
         if not old_text:
             return tool_error("old_text is required for 'remove' action.", success=False)
-        result = store.remove(target, old_text)
+        result = store.remove(target, old_text, partition=partition)
 
     else:
         return tool_error(f"Unknown action '{action}'. Use: add, replace, remove", success=False)
@@ -523,7 +627,7 @@ MEMORY_SCHEMA = {
         "- You learn a convention, API quirk, or workflow specific to this user's setup\n"
         "- You identify a stable fact that will be useful again in future sessions\n\n"
         "PRIORITY: User preferences and corrections > environment facts > procedural knowledge. "
-        "The most valuable memory prevents the user from having to repeat themselves.\n\n"
+        "The most valuable memory is one that prevents the user from having to repeat themselves.\n\n"
         "Do NOT save task progress, session outcomes, completed-work logs, or temporary TODO "
         "state to memory; use session_search to recall those from past transcripts.\n"
         "If you've discovered a new way to do something, solved a problem that could be "
@@ -531,6 +635,13 @@ MEMORY_SCHEMA = {
         "TWO TARGETS:\n"
         "- 'user': who the user is -- name, role, preferences, communication style, pet peeves\n"
         "- 'memory': your notes -- environment facts, project conventions, tool quirks, lessons learned\n\n"
+        "PARTITIONS (target='memory' only):\n"
+        "- Use the 'partition' parameter to save to a topic-scoped partition instead of the default memory.\n"
+        "- Built-in partitions: 'environment' (OS, tools, paths), 'projects' (codebases, repos), "
+        "'tools' (CLI tools, configs, quirks), 'workflows' (procedures, conventions).\n"
+        "- You can create custom partitions for any topic (lowercase, letters/numbers/hyphens).\n"
+        "- Each partition has its own character limit and is displayed separately in the system prompt.\n"
+        "- When in doubt, use a partition. Keep the default 'memory' for general/miscellaneous notes.\n\n"
         "ACTIONS: add (new entry), replace (update existing -- old_text identifies it), "
         "remove (delete -- old_text identifies it).\n\n"
         "SKIP: trivial/obvious info, things easily re-discovered, raw data dumps, and temporary task state."
@@ -547,6 +658,15 @@ MEMORY_SCHEMA = {
                 "type": "string",
                 "enum": ["memory", "user"],
                 "description": "Which memory store: 'memory' for personal notes, 'user' for user profile."
+            },
+            "partition": {
+                "type": "string",
+                "description": (
+                    "Optional topic-scoped partition (target='memory' only). "
+                    "Built-in: 'environment', 'projects', 'tools', 'workflows'. "
+                    "Custom: any lowercase name (letters, numbers, hyphens, underscores). "
+                    "Omit to use the default general memory."
+                ),
             },
             "content": {
                 "type": "string",
@@ -574,6 +694,7 @@ registry.register(
         target=args.get("target", "memory"),
         content=args.get("content"),
         old_text=args.get("old_text"),
+        partition=args.get("partition"),
         store=kw.get("store")),
     check_fn=check_memory_requirements,
     emoji="🧠",

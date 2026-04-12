@@ -3211,6 +3211,12 @@ class AIAgent:
                 user_block = self._memory_store.format_for_system_prompt("user")
                 if user_block:
                     prompt_parts.append(user_block)
+            # Partition blocks — injected after main memory/user
+            if self._memory_enabled:
+                for topic in self._memory_store.get_partition_topics():
+                    part_block = self._memory_store.format_partition_for_system_prompt(topic)
+                    if part_block:
+                        prompt_parts.append(part_block)
 
         # External memory provider system prompt block (additive to built-in)
         if self._memory_manager:
