@@ -1929,6 +1929,14 @@ class HermesCLI:
             if context_length:
                 snapshot["context_percent"] = max(0, min(100, round((context_tokens / context_length) * 100)))
 
+        # Partition topics loaded in memory
+        mem_store = getattr(agent, "_memory_store", None)
+        if mem_store:
+            try:
+                snapshot["partition_topics"] = mem_store.get_partition_topics()
+            except Exception:
+                snapshot["partition_topics"] = []
+
         return snapshot
 
     @staticmethod
@@ -2058,6 +2066,9 @@ class HermesCLI:
                 context_label = "ctx --"
 
             parts = [f"⚕ {snapshot['model_short']}", context_label, percent_label]
+            partitions = snapshot.get("partition_topics", [])
+            if partitions:
+                parts.append(f"📁{','.join(partitions)}")
             parts.append(duration_label)
             return self._trim_status_bar_text(" │ ".join(parts), width)
         except Exception:
@@ -2115,10 +2126,16 @@ class HermesCLI:
                         (bar_style, self._build_context_bar(percent)),
                         ("class:status-bar-dim", " "),
                         (bar_style, percent_label),
-                        ("class:status-bar-dim", " │ "),
-                        ("class:status-bar-dim", duration_label),
-                        ("class:status-bar", " "),
                     ]
+                    # Partition topics
+                    partitions = snapshot.get("partition_topics", [])
+                    if partitions:
+                        part_label = ",".join(partitions)
+                        frags.append(("class:status-bar-dim", " │ "))
+                        frags.append(("class:status-bar-strong", f"📁{part_label}"))
+                    frags.append(("class:status-bar-dim", " │ "))
+                    frags.append(("class:status-bar-dim", duration_label))
+                    frags.append(("class:status-bar", " "))
 
             total_width = sum(self._status_bar_display_width(text) for _, text in frags)
             if total_width > width:
