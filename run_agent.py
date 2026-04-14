@@ -1240,6 +1240,8 @@ class AIAgent:
         except Exception:
             pass
 
+
+
         # Tool-use enforcement config: "auto" (default — matches hardcoded
         # model list), true (always), false (never), or list of substrings.
         _agent_section = _agent_cfg.get("agent", {})
@@ -3266,6 +3268,25 @@ class AIAgent:
         if self.provider:
             timestamp_line += f"\nProvider: {self.provider}"
         prompt_parts.append(timestamp_line)
+
+        # Project context — inject current project info into system prompt
+        if "project" in self.valid_tool_names and self.session_id:
+            try:
+                from hermes_state import SessionDB as _SDB
+                _p_home = Path(os.environ.get("HERMES_HOME", Path.home() / ".hermes"))
+                _p_db = _SDB(_p_home / "state.db")
+                _p_session = _p_db.get_session(self.session_id)
+                if _p_session and _p_session.get("project_id"):
+                    _p_info = _p_db.get_project(_p_session["project_id"])
+                    if _p_info:
+                        _proj_lines = [f"Active Project: {_p_info['name']}"]
+                        if _p_info.get("path"):
+                            _proj_lines.append(f"Project Directory: {_p_info['path']}")
+                        if _p_info.get("description"):
+                            _proj_lines.append(f"Project Description: {_p_info['description']}")
+                        prompt_parts.append("\n".join(_proj_lines))
+            except Exception:
+                pass
 
         # Alibaba Coding Plan API always returns "glm-4.7" as model name regardless
         # of the requested model. Inject explicit model identity into the system prompt
@@ -6953,6 +6974,20 @@ class AIAgent:
                 except Exception:
                     pass
             return result
+        elif function_name == "project":
+            from tools.project_tool import project_tool as _project_tool
+            result = _project_tool(
+                action=function_args.get("action", ""),
+                name=function_args.get("name"),
+                path=function_args.get("path"),
+                description=function_args.get("description"),
+                session_id=self.session_id,
+            )
+            # If project was set/unset, invalidate system prompt so project
+            # context gets refreshed on next turn.
+            if function_args.get("action") in ("set", "unset") and self._cached_system_prompt is not None:
+                self._invalidate_system_prompt()
+            return result
         elif self._memory_manager and self._memory_manager.has_tool(function_name):
             return self._memory_manager.handle_tool_call(function_name, function_args)
         elif function_name == "clarify":
@@ -10609,15 +10644,35 @@ class AIAgent:
 
         # Background memory/skill review — runs AFTER the response is delivered
         # so it never competes with the user's task for model attention.
+        #
+        # Plugin hook: pre_background_review
+        # Plugins (e.g. copilot-nudge) can intercept and return False to skip.
+        # If no plugin returns False, proceed as normal.
         if final_response and not interrupted and (_should_review_memory or _should_review_skills):
+            _proceed_with_review = True  # default: go ahead
             try:
-                self._spawn_background_review(
-                    messages_snapshot=list(messages),
+                from hermes_cli.plugins import invoke_hook as _invoke_hook
+                _hook_results = _invoke_hook(
+                    "pre_background_review",
+                    messages=messages,
                     review_memory=_should_review_memory,
                     review_skills=_should_review_skills,
+                    session_id=self.session_id,
                 )
+                # If any plugin explicitly returns False, skip the review
+                if _hook_results and any(r is False for r in _hook_results):
+                    _proceed_with_review = False
             except Exception:
-                pass  # Background review is best-effort
+                pass  # on error, fall through to original behavior
+            if _proceed_with_review:
+                try:
+                    self._spawn_background_review(
+                        messages_snapshot=list(messages),
+                        review_memory=_should_review_memory,
+                        review_skills=_should_review_skills,
+                    )
+                except Exception:
+                    pass  # Background review is best-effort
 
         # Note: Memory provider on_session_end() + shutdown_all() are NOT
         # called here — run_conversation() is called once per user message in

@@ -62,6 +62,7 @@ VALID_HOOKS: Set[str] = {
     "on_session_end",
     "on_session_finalize",
     "on_session_reset",
+    "pre_background_review",
 }
 
 ENTRY_POINTS_GROUP = "hermes_agent.plugins"
