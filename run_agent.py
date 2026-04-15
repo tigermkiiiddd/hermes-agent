@@ -1120,7 +1120,7 @@ class AIAgent:
         
         # In-memory todo list for task planning (one per agent/session)
         from tools.todo_tool import TodoStore
-        self._todo_store = TodoStore()
+        self._todo_store = TodoStore(db=self._session_db, session_id=self.session_id)
         
         # Load config once for memory, skills, and compression sections
         try:
@@ -3076,13 +3076,22 @@ class AIAgent:
 
     def _hydrate_todo_store(self, history: List[Dict[str, Any]]) -> None:
         """
-        Recover todo state from conversation history.
+        Recover todo state — try DB first, then fall back to history scan.
         
         The gateway creates a fresh AIAgent per message, so the in-memory
-        TodoStore is empty. We scan the history for the most recent todo
-        tool response and replay it to reconstruct the state.
+        TodoStore is empty. We try to restore from the session_todos table
+        first (fast, reliable). If that fails, we scan the conversation
+        history for the most recent todo tool response.
         """
-        # Walk history backwards to find the most recent todo tool response
+        # Try DB restore first
+        if self._todo_store.restore_from_db():
+            if not self.quiet_mode:
+                count = len(self._todo_store.read())
+                self._vprint(f"{self.log_prefix}📋 Restored {count} todo item(s) from DB")
+            _set_interrupt(False)
+            return
+        
+        # Fallback: Walk history backwards to find the most recent todo tool response
         last_todo_response = None
         for msg in reversed(history):
             if msg.get("role") != "tool":
@@ -3100,7 +3109,7 @@ class AIAgent:
                 continue
         
         if last_todo_response:
-            # Replay the items into the store (replace mode)
+            # Replay the items into the store (replace mode) — this also persists to DB
             self._todo_store.write(last_todo_response, merge=False)
             if not self.quiet_mode:
                 self._vprint(f"{self.log_prefix}📋 Restored {len(last_todo_response)} todo item(s) from history")
@@ -6976,13 +6985,14 @@ class AIAgent:
             return result
         elif function_name == "project":
             from tools.project_tool import project_tool as _project_tool
-            result = _project_tool(
+            _proj_result = _project_tool(
                 action=function_args.get("action", ""),
                 name=function_args.get("name"),
                 path=function_args.get("path"),
                 description=function_args.get("description"),
                 session_id=self.session_id,
             )
+            result = json.dumps(_proj_result, ensure_ascii=False) if isinstance(_proj_result, dict) else _proj_result
             # If project was set/unset, invalidate system prompt so project
             # context gets refreshed on next turn.
             if function_args.get("action") in ("set", "unset") and self._cached_system_prompt is not None:

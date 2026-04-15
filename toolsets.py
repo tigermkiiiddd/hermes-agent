@@ -50,6 +50,8 @@ _HERMES_CORE_TOOLS = [
     "todo", "memory",
     # Session history search
     "session_search",
+    # Project management
+    "project",
     # Clarifying questions
     "clarify",
     # Code execution + delegation
@@ -164,7 +166,7 @@ TOOLSETS = {
     
     "memory": {
         "description": "Persistent memory across sessions (personal notes + user profile)",
-        "tools": ["memory"],
+        "tools": ["memory", "project"],
         "includes": []
     },
     
@@ -237,6 +239,7 @@ TOOLSETS = {
             "browser_vision", "browser_console",
             "todo", "memory",
             "session_search",
+            "project",
             "execute_code", "delegate_task",
         ],
         "includes": []
@@ -264,6 +267,8 @@ TOOLSETS = {
             "todo", "memory",
             # Session history search
             "session_search",
+            # Project management
+            "project",
             # Code execution + delegation
             "execute_code", "delegate_task",
             # Cronjob management

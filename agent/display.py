@@ -886,12 +886,34 @@ def get_cute_tool_message(
     if tool_name == "todo":
         todos_arg = args.get("todos")
         merge = args.get("merge", False)
+        # Status markers for per-item display
+        _markers = {"completed": "[x]", "in_progress": "[>]", "pending": "[ ]", "cancelled": "[~]"}
+        # Parse result JSON to get individual items
+        _todo_items = None
+        if result:
+            try:
+                import json as _json
+                _parsed = _json.loads(result)
+                if isinstance(_parsed, dict) and "todos" in _parsed:
+                    _todo_items = _parsed["todos"]
+            except Exception:
+                pass
+
         if todos_arg is None:
-            return _wrap(f"┊ 📋 plan      reading tasks  {dur}")
+            header = "reading tasks"
         elif merge:
-            return _wrap(f"┊ 📋 plan      update {len(todos_arg)} task(s)  {dur}")
+            header = f"update {len(todos_arg)} task(s)"
         else:
-            return _wrap(f"┊ 📋 plan      {len(todos_arg)} task(s)  {dur}")
+            header = f"{len(todos_arg)} task(s)"
+
+        lines = [_wrap(f"┊ 📋 plan      {header}  {dur}")]
+        if _todo_items:
+            for _ti in _todo_items:
+                _mk = _markers.get(_ti.get("status", ""), "[?]")
+                _tid = _ti.get("id", "?")
+                _tc = _ti.get("content", "")
+                lines.append(_wrap(f"┊   {_mk} {_tid}: {_tc}"))
+        return "\n".join(lines)
     if tool_name == "session_search":
         return _wrap(f"┊ 🔍 recall    \"{_trunc(args.get('query', ''), 35)}\"  {dur}")
     if tool_name == "memory":

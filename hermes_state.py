@@ -31,7 +31,7 @@ T = TypeVar("T")
 
 DEFAULT_DB_PATH = get_hermes_home() / "state.db"
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -99,6 +99,14 @@ CREATE INDEX IF NOT EXISTS idx_sessions_source ON sessions(source);
 CREATE INDEX IF NOT EXISTS idx_sessions_parent ON sessions(parent_session_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_started ON sessions(started_at DESC);
 CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, timestamp);
+
+CREATE TABLE IF NOT EXISTS session_todos (
+    session_id TEXT NOT NULL,
+    items TEXT NOT NULL,
+    updated_at REAL NOT NULL,
+    PRIMARY KEY (session_id),
+    FOREIGN KEY (session_id) REFERENCES sessions(id)
+);
 """
 
 FTS_SQL = """
@@ -363,6 +371,18 @@ class SessionDB:
                 except sqlite3.OperationalError:
                     pass
                 cursor.execute("UPDATE schema_version SET version = 7")
+            if current_version < 8:
+                # v8: session_todos table for persistent todo state
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS session_todos (
+                        session_id TEXT NOT NULL,
+                        items TEXT NOT NULL,
+                        updated_at REAL NOT NULL,
+                        PRIMARY KEY (session_id),
+                        FOREIGN KEY (session_id) REFERENCES sessions(id)
+                    )
+                """)
+                cursor.execute("UPDATE schema_version SET version = 8")
 
         # Unique title index — always ensure it exists (safe to run after migrations
         # since the title column is guaranteed to exist at this point)
@@ -1364,3 +1384,33 @@ class SessionDB:
             (project_id,),
         )
         return [dict(row) for row in cursor.fetchall()]
+
+    # =========================================================================
+    # Session todos
+    # =========================================================================
+
+    def save_todos(self, session_id: str, items: List[Dict[str, Any]]) -> None:
+        """Persist todo items for a session. Upserts by session_id."""
+        import time as _time
+        def _do(conn):
+            conn.execute(
+                "INSERT INTO session_todos (session_id, items, updated_at) "
+                "VALUES (?, ?, ?) "
+                "ON CONFLICT(session_id) DO UPDATE SET items=excluded.items, updated_at=excluded.updated_at",
+                (session_id, json.dumps(items, ensure_ascii=False), _time.time()),
+            )
+        self._execute_write(_do)
+
+    def load_todos(self, session_id: str) -> Optional[List[Dict[str, Any]]]:
+        """Load persisted todo items for a session. Returns None if no record."""
+        cursor = self._conn.execute(
+            "SELECT items FROM session_todos WHERE session_id = ?",
+            (session_id,),
+        )
+        row = cursor.fetchone()
+        if not row:
+            return None
+        try:
+            return json.loads(row["items"] if isinstance(row, sqlite3.Row) else row[0])
+        except (json.JSONDecodeError, TypeError):
+            return None

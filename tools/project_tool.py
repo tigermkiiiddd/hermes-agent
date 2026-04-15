@@ -200,11 +200,15 @@ registry.register(
     name="project",
     toolset="memory",
     schema=PROJECT_SCHEMA,
-    handler=lambda args, **kw: project_tool(
-        action=args.get("action", ""),
-        name=args.get("name"),
-        path=args.get("path"),
-        description=args.get("description"),
+    handler=lambda args, **kw: json.dumps(
+        project_tool(
+            action=args.get("action", ""),
+            name=args.get("name"),
+            path=args.get("path"),
+            description=args.get("description"),
+            session_id=kw.get("session_id"),
+        ),
+        ensure_ascii=False,
     ),
     check_fn=lambda: True,
     emoji="📁",

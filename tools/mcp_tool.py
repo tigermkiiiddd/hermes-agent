@@ -1228,6 +1228,11 @@ def _interpolate_env_vars(value):
 def _load_mcp_config() -> Dict[str, dict]:
     """Read ``mcp_servers`` from the Hermes config file.
 
+    Also merges MCP servers registered by plugins via
+    ``PluginContext.register_mcp_server()`` or declared in ``plugin.yaml``.
+    Plugin servers take precedence over config.yaml entries with the same
+    name.
+
     Returns a dict of ``{server_name: server_config}`` or empty dict.
     Server config can contain either ``command``/``args``/``env`` for stdio
     transport or ``url``/``headers`` for HTTP transport, plus optional
@@ -1236,22 +1241,45 @@ def _load_mcp_config() -> Dict[str, dict]:
     ``${ENV_VAR}`` placeholders in string values are resolved from
     ``os.environ`` (which includes ``~/.hermes/.env`` loaded at startup).
     """
+    # Start with config.yaml servers
+    servers: Dict[str, dict] = {}
     try:
         from hermes_cli.config import load_config
         config = load_config()
-        servers = config.get("mcp_servers")
-        if not servers or not isinstance(servers, dict):
-            return {}
-        # Ensure .env vars are available for interpolation
-        try:
-            from hermes_cli.env_loader import load_hermes_dotenv
-            load_hermes_dotenv()
-        except Exception:
-            pass
-        return {name: _interpolate_env_vars(cfg) for name, cfg in servers.items()}
+        yaml_servers = config.get("mcp_servers")
+        if yaml_servers and isinstance(yaml_servers, dict):
+            # Ensure .env vars are available for interpolation
+            try:
+                from hermes_cli.env_loader import load_hermes_dotenv
+                load_hermes_dotenv()
+            except Exception:
+                pass
+            servers.update(
+                {name: _interpolate_env_vars(cfg) for name, cfg in yaml_servers.items()}
+            )
     except Exception as exc:
         logger.debug("Failed to load MCP config: %s", exc)
-        return {}
+
+    # Merge plugin-registered MCP servers (plugins take precedence)
+    try:
+        from hermes_cli.plugins import get_plugin_mcp_servers
+        plugin_servers = get_plugin_mcp_servers()
+        for srv_name, entry in plugin_servers.items():
+            if srv_name not in servers:
+                servers[srv_name] = _interpolate_env_vars(entry["config"])
+                logger.debug(
+                    "MCP server '%s' from plugin '%s' merged into config",
+                    srv_name, entry.get("plugin", "?"),
+                )
+            else:
+                logger.debug(
+                    "MCP server '%s' exists in config.yaml, plugin '%s' version skipped",
+                    srv_name, entry.get("plugin", "?"),
+                )
+    except Exception as exc:
+        logger.debug("Failed to merge plugin MCP servers: %s", exc)
+
+    return servers
 
 
 # ---------------------------------------------------------------------------

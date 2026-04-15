@@ -8261,8 +8261,22 @@ class HermesCLI:
         Wrapper CLIs can override this to inject widgets (e.g. a mini-player,
         overlay menu) into the layout without overriding ``run()``.  Widgets
         are inserted between the spacer and the status bar.
+
+        Plugins may also contribute widgets via ``ctx.register_tui_widget()``.
         """
-        return []
+        widgets = []
+        try:
+            from hermes_cli.plugins import get_plugin_manager
+            for factory in get_plugin_manager()._tui_widget_factories:
+                try:
+                    w = factory(self)
+                    if w is not None:
+                        widgets.append(w)
+                except Exception as exc:
+                    logger.debug("Plugin TUI widget factory failed: %s", exc)
+        except Exception:
+            pass
+        return widgets
 
     def _register_extra_tui_keybindings(self, kb, *, input_area) -> None:
         """Register extra keybindings on the TUI ``KeyBindings`` object.

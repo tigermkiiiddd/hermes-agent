@@ -101,6 +101,7 @@ class PluginManifest:
     requires_env: List[Union[str, Dict[str, Any]]] = field(default_factory=list)
     provides_tools: List[str] = field(default_factory=list)
     provides_hooks: List[str] = field(default_factory=list)
+    mcp_servers: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     source: str = ""        # "user", "project", or "entrypoint"
     path: Optional[str] = None
 
@@ -310,6 +311,57 @@ class PluginContext:
             self.manifest.name, qualified,
         )
 
+    # -- TUI widget registration ---------------------------------------------
+
+    def register_tui_widget(self, factory: Callable) -> None:
+        """Register a prompt_toolkit widget factory for the TUI layout.
+
+        *factory* is a callable ``factory(cli_ref) -> Widget`` that receives
+        the CLI instance and returns a prompt_toolkit layout element (e.g.
+        ``ConditionalContainer(Window(...))``).  Widgets are inserted between
+        the spacer and the status bar in ``_build_tui_layout_children()``.
+        """
+        if not callable(factory):
+            raise TypeError("TUI widget factory must be callable")
+        self._manager._tui_widget_factories.append(factory)
+        logger.debug("Plugin %s registered TUI widget", self.manifest.name)
+
+    # -- MCP server registration ----------------------------------------------
+
+    def register_mcp_server(self, name: str, config: dict) -> None:
+        """Register an MCP server provided by this plugin.
+
+        The server will be automatically connected during MCP discovery,
+        alongside servers defined in ``~/.hermes/config.yaml``.  The config
+        dict follows the same format as config.yaml ``mcp_servers`` entries:
+
+        - **stdio** — ``{"command": "npx", "args": [...], "env": {...}}``
+        - **http**  — ``{"url": "https://...", "headers": {...}}``
+
+        Optional keys: ``timeout``, ``connect_timeout``, ``enabled``,
+        ``tools`` (include/exclude filter).
+
+        Plugin MCP servers take precedence over config.yaml entries with
+        the same name, so plugins can override user defaults.
+        """
+        if not name or not isinstance(name, str):
+            raise ValueError("MCP server name must be a non-empty string")
+        if not config or not isinstance(config, dict):
+            raise ValueError("MCP server config must be a non-empty dict")
+        # Must have either url (http) or command (stdio)
+        if not config.get("url") and not config.get("command"):
+            raise ValueError(
+                "MCP server config must contain 'url' (http) or 'command' (stdio)"
+            )
+        self._manager._plugin_mcp_servers[name] = {
+            "config": config,
+            "plugin": self.manifest.name,
+        }
+        logger.debug(
+            "Plugin %s registered MCP server: %s",
+            self.manifest.name, name,
+        )
+
 
 # ---------------------------------------------------------------------------
 # PluginManager
@@ -324,10 +376,13 @@ class PluginManager:
         self._plugin_tool_names: Set[str] = set()
         self._cli_commands: Dict[str, dict] = {}
         self._context_engine = None  # Set by a plugin via register_context_engine()
+        self._tui_widget_factories: List[Callable] = []  # (cli_ref) -> prompt_toolkit Widget
         self._discovered: bool = False
         self._cli_ref = None  # Set by CLI after plugin discovery
         # Plugin skill registry: qualified name → metadata dict.
         self._plugin_skills: Dict[str, Dict[str, Any]] = {}
+        # Plugin MCP servers: server_name → {config, plugin}
+        self._plugin_mcp_servers: Dict[str, Dict[str, Any]] = {}
 
     # -----------------------------------------------------------------------
     # Public
@@ -404,6 +459,7 @@ class PluginManager:
                     requires_env=data.get("requires_env", []),
                     provides_tools=data.get("provides_tools", []),
                     provides_hooks=data.get("provides_hooks", []),
+                    mcp_servers=data.get("mcp_servers", {}),
                     source=source,
                     path=str(child),
                 )
@@ -487,6 +543,19 @@ class PluginManager:
                     }
                 )
                 loaded.enabled = True
+
+                # Auto-register any MCP servers declared in plugin.yaml
+                if manifest.mcp_servers:
+                    for srv_name, srv_cfg in manifest.mcp_servers.items():
+                        if srv_cfg.get("url") or srv_cfg.get("command"):
+                            self._plugin_mcp_servers[srv_name] = {
+                                "config": srv_cfg,
+                                "plugin": manifest.name,
+                            }
+                            logger.debug(
+                                "Plugin %s declared MCP server: %s (from plugin.yaml)",
+                                manifest.name, srv_name,
+                            )
 
         except Exception as exc:
             loaded.error = str(exc)
@@ -698,6 +767,14 @@ def get_pre_tool_call_block_message(
 def get_plugin_context_engine():
     """Return the plugin-registered context engine, or None."""
     return get_plugin_manager()._context_engine
+
+
+def get_plugin_mcp_servers() -> Dict[str, Dict[str, Any]]:
+    """Return all MCP servers registered by plugins.
+
+    Returns a dict of ``{server_name: {"config": {...}, "plugin": "name"}}``.
+    """
+    return dict(get_plugin_manager()._plugin_mcp_servers)
 
 
 def get_plugin_toolsets() -> List[tuple]:
