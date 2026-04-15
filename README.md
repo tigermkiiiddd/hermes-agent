@@ -2,6 +2,8 @@
 
 This is a fork of [NousResearch/hermes-agent](https://github.com/NousResearch/hermes-agent) with additional features developed locally.
 
+Designed to be used with [hermes-hudui](https://github.com/tigermkiiiddd/hermes-hudui) — a web dashboard (FastAPI + React) that provides a browser-based UI for managing sessions, projects, todos, health monitoring, and more. The two projects share the same `state.db`, so all data (projects, todos, session history) is visible in both CLI and web dashboard in real time.
+
 ## What's Changed
 
 ### Project System
