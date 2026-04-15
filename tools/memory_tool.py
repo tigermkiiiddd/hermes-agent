@@ -455,8 +455,25 @@ class MemoryStore:
         return self._partition_snapshot.get(topic)
 
     def get_partition_topics(self) -> List[str]:
-        """Return sorted list of loaded partition topics."""
+        """Return sorted list of loaded partition topics (with content only)."""
         return sorted(self._partition_snapshot.keys())
+
+    def get_all_partition_topics(self) -> List[str]:
+        """Return sorted list of all partition topics (including empty ones).
+
+        Combines BUILTIN_PARTITIONS with any custom partition files found
+        on disk.
+        """
+        from pathlib import Path
+        topics = set(BUILTIN_PARTITIONS)
+        try:
+            part_dir = get_partitions_dir()
+            if part_dir.exists():
+                for pf in part_dir.glob("*.md"):
+                    topics.add(pf.stem)
+        except Exception:
+            pass
+        return sorted(topics)
 
     # -- Internal helpers --
 

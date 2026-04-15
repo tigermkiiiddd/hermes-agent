@@ -31,7 +31,7 @@ T = TypeVar("T")
 
 DEFAULT_DB_PATH = get_hermes_home() / "state.db"
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -107,6 +107,24 @@ CREATE TABLE IF NOT EXISTS session_todos (
     PRIMARY KEY (session_id),
     FOREIGN KEY (session_id) REFERENCES sessions(id)
 );
+
+CREATE TABLE IF NOT EXISTS project_issues (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_name TEXT NOT NULL,
+    title TEXT NOT NULL,
+    description TEXT,
+    status TEXT NOT NULL DEFAULT 'open',
+    assignee_session_id TEXT,
+    priority TEXT DEFAULT 'P2',
+    labels TEXT,
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL,
+    closed_at REAL,
+    FOREIGN KEY (project_name) REFERENCES projects(name)
+);
+
+CREATE INDEX IF NOT EXISTS idx_issues_project ON project_issues(project_name);
+CREATE INDEX IF NOT EXISTS idx_issues_status ON project_issues(status);
 """
 
 FTS_SQL = """
@@ -383,6 +401,32 @@ class SessionDB:
                     )
                 """)
                 cursor.execute("UPDATE schema_version SET version = 8")
+
+            if current_version < 9:
+                # v9: project_issues table for cross-session task tracking
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS project_issues (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        project_name TEXT NOT NULL,
+                        title TEXT NOT NULL,
+                        description TEXT,
+                        status TEXT NOT NULL DEFAULT 'open',
+                        assignee_session_id TEXT,
+                        priority TEXT DEFAULT 'P2',
+                        labels TEXT,
+                        created_at REAL NOT NULL,
+                        updated_at REAL NOT NULL,
+                        closed_at REAL,
+                        FOREIGN KEY (project_name) REFERENCES projects(name)
+                    )
+                """)
+                cursor.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_issues_project ON project_issues(project_name)"
+                )
+                cursor.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_issues_status ON project_issues(status)"
+                )
+                cursor.execute("UPDATE schema_version SET version = 9")
 
         # Unique title index — always ensure it exists (safe to run after migrations
         # since the title column is guaranteed to exist at this point)
@@ -1349,6 +1393,7 @@ class SessionDB:
             row = conn.execute("SELECT 1 FROM projects WHERE name = ?", (name,)).fetchone()
             if not row:
                 return False
+            conn.execute("DELETE FROM project_issues WHERE project_name = ?", (name,))
             conn.execute("UPDATE sessions SET project_id = NULL WHERE project_id = ?", (name,))
             conn.execute("DELETE FROM projects WHERE name = ?", (name,))
             return True
@@ -1414,3 +1459,155 @@ class SessionDB:
             return json.loads(row["items"] if isinstance(row, sqlite3.Row) else row[0])
         except (json.JSONDecodeError, TypeError):
             return None
+
+    # =========================================================================
+    # Project issues
+    # =========================================================================
+
+    def create_issue(
+        self,
+        project_name: str,
+        title: str,
+        description: str = None,
+        priority: str = "P2",
+        labels: List[str] = None,
+    ) -> Dict[str, Any]:
+        """Create an issue under a project. Returns the new issue dict."""
+        import time as _time
+        now = _time.time()
+        labels_json = json.dumps(labels or [], ensure_ascii=False)
+
+        def _do(conn):
+            cursor = conn.execute(
+                "INSERT INTO project_issues "
+                "(project_name, title, description, status, priority, labels, created_at, updated_at) "
+                "VALUES (?, ?, ?, 'open', ?, ?, ?, ?)",
+                (project_name, title, description, priority, labels_json, now, now),
+            )
+            conn.commit()
+            return cursor.lastrowid
+
+        issue_id = self._execute_write(_do)
+        return self.get_issue(issue_id)
+
+    def get_issue(self, issue_id: int) -> Optional[Dict[str, Any]]:
+        """Get a single issue by id."""
+        cursor = self._conn.execute(
+            "SELECT * FROM project_issues WHERE id = ?", (issue_id,)
+        )
+        row = cursor.fetchone()
+        if not row:
+            return None
+        return self._issue_row_to_dict(row)
+
+    def list_issues(
+        self,
+        project_name: str,
+        status: str = None,
+    ) -> List[Dict[str, Any]]:
+        """List issues for a project, optionally filtered by status."""
+        if status:
+            cursor = self._conn.execute(
+                "SELECT * FROM project_issues WHERE project_name = ? AND status = ? "
+                "ORDER BY priority ASC, created_at ASC",
+                (project_name, status),
+            )
+        else:
+            cursor = self._conn.execute(
+                "SELECT * FROM project_issues WHERE project_name = ? "
+                "ORDER BY priority ASC, created_at ASC",
+                (project_name,),
+            )
+        return [self._issue_row_to_dict(row) for row in cursor.fetchall()]
+
+    def update_issue(
+        self,
+        issue_id: int,
+        title: str = ...,
+        description: str = ...,
+        status: str = ...,
+        priority: str = ...,
+        labels: List[str] = ...,
+        assignee_session_id: str = ...,
+    ) -> Optional[Dict[str, Any]]:
+        """Update issue fields. Use ... (Ellipsis) to skip a field."""
+        import time as _time
+        existing = self.get_issue(issue_id)
+        if not existing:
+            return None
+
+        sets = []
+        vals = []
+        for col, val in [
+            ("title", title),
+            ("description", description),
+            ("status", status),
+            ("priority", priority),
+            ("labels", labels),
+            ("assignee_session_id", assignee_session_id),
+        ]:
+            if val is not ...:
+                if col == "labels":
+                    val = json.dumps(val or [], ensure_ascii=False)
+                sets.append(f"{col} = ?")
+                vals.append(val)
+
+        # Auto-set closed_at when closing
+        if status is not ... and status in ("closed", "cancelled"):
+            import time as _time2
+            sets.append("closed_at = ?")
+            vals.append(_time2.time())
+        elif status is not ... and existing.get("closed_at"):
+            sets.append("closed_at = NULL")
+
+        if not sets:
+            return existing
+
+        sets.append("updated_at = ?")
+        vals.append(_time.time())
+        vals.append(issue_id)
+
+        def _do(conn):
+            conn.execute(
+                f"UPDATE project_issues SET {', '.join(sets)} WHERE id = ?", vals
+            )
+            conn.commit()
+
+        self._execute_write(_do)
+        return self.get_issue(issue_id)
+
+    def delete_issue(self, issue_id: int) -> bool:
+        """Delete an issue. Returns True if found."""
+        def _do(conn):
+            cursor = conn.execute(
+                "DELETE FROM project_issues WHERE id = ?", (issue_id,)
+            )
+            conn.commit()
+            return cursor.rowcount > 0
+
+        return self._execute_write(_do)
+
+    def assign_issue(self, issue_id: int, session_id: Optional[str]) -> Optional[Dict[str, Any]]:
+        """Assign an issue to a session. Pass None to unassign."""
+        return self.update_issue(issue_id, assignee_session_id=session_id or "")
+
+    def get_open_issues_for_project(self, project_name: str) -> List[Dict[str, Any]]:
+        """Get all open/in_progress issues for a project."""
+        cursor = self._conn.execute(
+            "SELECT * FROM project_issues "
+            "WHERE project_name = ? AND status IN ('open', 'in_progress') "
+            "ORDER BY priority ASC, created_at ASC",
+            (project_name,),
+        )
+        return [self._issue_row_to_dict(row) for row in cursor.fetchall()]
+
+    @staticmethod
+    def _issue_row_to_dict(row) -> Dict[str, Any]:
+        """Convert a project_issues row to dict, parsing labels JSON."""
+        d = dict(row) if isinstance(row, sqlite3.Row) else dict(row)
+        if "labels" in d and isinstance(d["labels"], str):
+            try:
+                d["labels"] = json.loads(d["labels"])
+            except (json.JSONDecodeError, TypeError):
+                d["labels"] = []
+        return d

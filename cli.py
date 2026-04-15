@@ -1934,11 +1934,11 @@ class HermesCLI:
             if context_length:
                 snapshot["context_percent"] = max(0, min(100, round((context_tokens / context_length) * 100)))
 
-        # Partition topics loaded in memory
+        # Partition topics (all defined, including empty)
         mem_store = getattr(agent, "_memory_store", None)
         if mem_store:
             try:
-                snapshot["partition_topics"] = mem_store.get_partition_topics()
+                snapshot["partition_topics"] = mem_store.get_all_partition_topics()
             except Exception:
                 snapshot["partition_topics"] = []
 

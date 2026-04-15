@@ -3319,6 +3319,19 @@ class AIAgent:
                             _proj_lines.append(f"Project Directory: {_p_info['path']}")
                         if _p_info.get("description"):
                             _proj_lines.append(f"Project Description: {_p_info['description']}")
+                        # Inject open issues for cross-session task tracking
+                        _open_issues = _p_db.get_open_issues_for_project(_p_info['name'])
+                        if _open_issues:
+                            _proj_lines.append(f"Open Issues ({len(_open_issues)}):")
+                            for _iss in _open_issues:
+                                _marker = "▸" if _iss["status"] == "in_progress" else "○"
+                                _p = _iss.get("priority", "P2")
+                                _assignee = _iss.get("assignee_session_id", "")
+                                _assignee_short = f" → {_assignee[:8]}…" if _assignee else ""
+                                _proj_lines.append(
+                                    f"  {_marker} #{_iss['id']} {_iss['title']} "
+                                    f"[{_p}]{_assignee_short}"
+                                )
                         prompt_parts.append("\n".join(_proj_lines))
             except Exception:
                 pass
