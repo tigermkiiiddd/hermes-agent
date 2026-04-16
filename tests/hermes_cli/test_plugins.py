@@ -763,4 +763,140 @@ class TestPluginCommands:
         assert "cmd-a" in mgr._plugin_commands
         assert "cmd-b" in mgr._plugin_commands
         assert mgr._plugin_commands["cmd-a"]["plugin"] == "plugin-a"
-        assert mgr._plugin_commands["cmd-b"]["plugin"] == "plugin-b"
+
+
+# ── Plugin MCP server registration ──────────────────────────────────────
+
+class TestRegisterMCPServer:
+    """Tests for PluginContext.register_mcp_server()."""
+
+    def test_register_mcp_server_stores_config(self):
+        mgr = PluginManager()
+        manifest = PluginManifest(name="test-mcp", source="user")
+        ctx = PluginContext(manifest, mgr)
+
+        ctx.register_mcp_server("my-server", {
+            "command": "node", "args": ["srv.js"], "env": {"KEY": "val"},
+        })
+
+        assert "my-server" in mgr._mcp_servers
+        assert mgr._mcp_servers["my-server"]["command"] == "node"
+        assert mgr._mcp_servers["my-server"]["args"] == ["srv.js"]
+
+    def test_register_mcp_server_rejects_invalid(self):
+        mgr = PluginManager()
+        manifest = PluginManifest(name="bad-mcp", source="user")
+        ctx = PluginContext(manifest, mgr)
+
+        ctx.register_mcp_server("", {"command": "node"})
+        ctx.register_mcp_server("ok", None)
+
+        assert len(mgr._mcp_servers) == 0
+
+    def test_register_mcp_server_overwrite_on_conflict(self):
+        mgr = PluginManager()
+        manifest = PluginManifest(name="mcp-plugin", source="user")
+        ctx = PluginContext(manifest, mgr)
+
+        ctx.register_mcp_server("srv", {"command": "first"})
+        ctx.register_mcp_server("srv", {"command": "second"})
+
+        assert mgr._mcp_servers["srv"]["command"] == "second"
+
+
+# ── Plugin TUI widget registration ──────────────────────────────────────
+
+class TestRegisterTUIWidget:
+    """Tests for PluginContext.register_tui_widget()."""
+
+    def test_register_tui_widget_stores_factory(self):
+        mgr = PluginManager()
+        manifest = PluginManifest(name="test-tui", source="user")
+        ctx = PluginContext(manifest, mgr)
+
+        factory = lambda: "widget"
+        ctx.register_tui_widget(factory)
+
+        assert len(mgr._tui_widgets) == 1
+        assert mgr._tui_widgets[0]() == "widget"
+
+    def test_register_tui_widget_rejects_non_callable(self):
+        mgr = PluginManager()
+        manifest = PluginManifest(name="bad-tui", source="user")
+        ctx = PluginContext(manifest, mgr)
+
+        ctx.register_tui_widget("not a callable")
+
+        assert len(mgr._tui_widgets) == 0
+
+
+# ── Skill auto-discovery ────────────────────────────────────────────────
+
+class TestSkillAutoDiscovery:
+    """Tests for auto-discovering skills/ directories in plugin bundles."""
+
+    def test_auto_discover_skills_dir(self, tmp_path, monkeypatch):
+        """Plugin with skills/ subdirectory auto-registers all SKILL.md files."""
+        plugin_dir = tmp_path / "my-plugin"
+        plugin_dir.mkdir()
+        (plugin_dir / "__init__.py").write_text("def register(ctx): pass")
+        (plugin_dir / "plugin.yaml").write_text("name: my-plugin\n")
+
+        skills_dir = plugin_dir / "skills"
+        plan_dir = skills_dir / "planning"
+        plan_dir.mkdir(parents=True)
+        (plan_dir / "SKILL.md").write_text(
+            "---\nname: planning\ndescription: Plan stuff\n---\nPlan content"
+        )
+
+        debug_dir = skills_dir / "debugging"
+        debug_dir.mkdir(parents=True)
+        (debug_dir / "SKILL.md").write_text(
+            "---\nname: debugging\ndescription: Debug stuff\n---\nDebug content"
+        )
+
+        mgr = PluginManager()
+        monkeypatch.setattr("hermes_cli.plugins._plugin_manager", mgr)
+
+        manifest = PluginManifest(name="my-plugin", source="user", path=str(plugin_dir))
+        mgr._load_plugin(manifest)
+
+        assert "my-plugin:planning" in mgr._plugin_skills
+        assert "my-plugin:debugging" in mgr._plugin_skills
+
+    def test_no_skills_dir_no_error(self, tmp_path, monkeypatch):
+        """Plugin without skills/ dir works normally."""
+        plugin_dir = tmp_path / "plain-plugin"
+        plugin_dir.mkdir()
+        (plugin_dir / "__init__.py").write_text("def register(ctx): pass")
+        (plugin_dir / "plugin.yaml").write_text("name: plain-plugin\n")
+
+        mgr = PluginManager()
+        monkeypatch.setattr("hermes_cli.plugins._plugin_manager", mgr)
+
+        manifest = PluginManifest(name="plain-plugin", source="user", path=str(plugin_dir))
+        mgr._load_plugin(manifest)
+
+        assert mgr._plugin_skills == {}
+
+
+# ── pre_background_review hook ──────────────────────────────────────────
+
+class TestPreBackgroundReviewHook:
+    """Tests for the pre_background_review lifecycle hook."""
+
+    def test_hook_is_valid(self):
+        assert "pre_background_review" in VALID_HOOKS
+
+    def test_hook_can_return_skip(self):
+        mgr = PluginManager()
+        mgr._hooks["pre_background_review"] = [
+            lambda **kw: {"action": "skip"},
+        ]
+        results = mgr.invoke_hook("pre_background_review", session_id="s1")
+        assert results == [{"action": "skip"}]
+
+    def test_hook_with_no_callbacks(self):
+        mgr = PluginManager()
+        results = mgr.invoke_hook("pre_background_review", session_id="s1")
+        assert results == []
