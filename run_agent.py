@@ -1199,7 +1199,7 @@ class AIAgent:
         
         # In-memory todo list for task planning (one per agent/session)
         from tools.todo_tool import TodoStore
-        self._todo_store = TodoStore()
+        self._todo_store = TodoStore(db=self._session_db, session_id=self.session_id)
         
         # Load config once for memory, skills, and compression sections
         try:
@@ -3145,6 +3145,19 @@ class AIAgent:
             "budget_max": self.iteration_budget.max_total,
         }
 
+    def get_todo_display_items(self) -> list:
+        """Return todo items as plain dicts for external consumers (CLI widgets, etc).
+
+        Returns a list of dicts with keys: id, content, status, priority, severity.
+        Each priority/severity is guaranteed to be a valid label (P0-P3, S1-S3).
+        Empty list means no active tasks.  Safe to call even when _todo_store
+        hasn't been initialised yet.
+        """
+        store = getattr(self, "_todo_store", None)
+        if store is None:
+            return []
+        return store.read()
+
     def shutdown_memory_provider(self, messages: list = None) -> None:
         """Shut down the memory provider and context engine — call at actual session boundaries.
 
@@ -3244,13 +3257,22 @@ class AIAgent:
 
     def _hydrate_todo_store(self, history: List[Dict[str, Any]]) -> None:
         """
-        Recover todo state from conversation history.
+        Recover todo state — try DB first, then fall back to history scan.
         
         The gateway creates a fresh AIAgent per message, so the in-memory
-        TodoStore is empty. We scan the history for the most recent todo
-        tool response and replay it to reconstruct the state.
+        TodoStore is empty. We try to restore from the session_todos table
+        first (fast, reliable). If that fails, we scan the conversation
+        history for the most recent todo tool response.
         """
-        # Walk history backwards to find the most recent todo tool response
+        # Try DB restore first
+        if self._todo_store.restore_from_db():
+            if not self.quiet_mode:
+                count = len(self._todo_store.read())
+                self._vprint(f"{self.log_prefix}📋 Restored {count} todo item(s) from DB")
+            _set_interrupt(False)
+            return
+        
+        # Fallback: Walk history backwards to find the most recent todo tool response
         last_todo_response = None
         for msg in reversed(history):
             if msg.get("role") != "tool":
@@ -3268,7 +3290,7 @@ class AIAgent:
                 continue
         
         if last_todo_response:
-            # Replay the items into the store (replace mode)
+            # Replay the items into the store (replace mode) — this also persists to DB
             self._todo_store.write(last_todo_response, merge=False)
             if not self.quiet_mode:
                 self._vprint(f"{self.log_prefix}📋 Restored {len(last_todo_response)} todo item(s) from history")

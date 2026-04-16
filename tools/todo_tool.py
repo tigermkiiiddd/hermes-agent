@@ -2,10 +2,14 @@
 """
 Todo Tool Module - Planning & Task Management
 
-Provides an in-memory task list the agent uses to decompose complex tasks,
-track progress, and maintain focus across long conversations. The state
-lives on the AIAgent instance (one per session) and is re-injected into
-the conversation after context compression events.
+Provides a task list the agent uses to decompose complex tasks,
+track progress, and maintain focus across long conversations.
+
+Persistence:
+- When a session_db + session_id are provided, every write() call
+  automatically persists the full list to the ``session_todos`` table
+  in state.db.  On next turn (gateway creates fresh AIAgent), the store
+  is rehydrated from DB before falling back to history scan.
 
 Design:
 - Single `todo` tool: provide `todos` param to write, omit to read
@@ -21,26 +25,83 @@ from typing import Dict, Any, List, Optional
 # Valid status values for todo items
 VALID_STATUSES = {"pending", "in_progress", "completed", "cancelled"}
 
+# Valid priority / severity levels
+VALID_PRIORITIES = {"P0", "P1", "P2", "P3"}
+VALID_SEVERITIES = {"S1", "S2", "S3"}
+
+
+def _normalize_priority(value: Any) -> str:
+    """Normalize a priority value to P0-P3."""
+    if not value:
+        return "P2"
+    s = str(value).strip().upper()
+    if s in VALID_PRIORITIES:
+        return s
+    # Accept bare number: 0->P0, 1->P1, etc.
+    if s.isdigit() and 0 <= int(s) <= 3:
+        return f"P{int(s)}"
+    return "P2"
+
+
+def _normalize_severity(value: Any) -> str:
+    """Normalize a severity value to S1-S3."""
+    if not value:
+        return "S2"
+    s = str(value).strip().upper()
+    if s in VALID_SEVERITIES:
+        return s
+    if s.isdigit() and 1 <= int(s) <= 3:
+        return f"S{int(s)}"
+    return "S2"
+
 
 class TodoStore:
     """
-    In-memory todo list. One instance per AIAgent (one per session).
+    Task list with optional DB persistence.
+
+    One instance per AIAgent (one per session).  When ``db`` and
+    ``session_id`` are provided, every write is persisted to state.db.
 
     Items are ordered -- list position is priority. Each item has:
       - id: unique string identifier (agent-chosen)
       - content: task description
       - status: pending | in_progress | completed | cancelled
+      - priority: P0 (critical) | P1 (high) | P2 (normal) | P3 (low)
+      - severity: S1 (blocker) | S2 (major) | S3 (minor)
     """
 
-    def __init__(self):
+    def __init__(self, db=None, session_id: Optional[str] = None):
         self._items: List[Dict[str, str]] = []
+        self._db = db
+        self._session_id = session_id
+
+    def _persist(self) -> None:
+        """Write current items to DB if db + session_id are set."""
+        if self._db and self._session_id:
+            try:
+                self._db.save_todos(self._session_id, self._items)
+            except Exception:
+                pass  # Don't crash agent on DB errors
+
+    def restore_from_db(self) -> bool:
+        """Try to load items from DB. Returns True if items were found."""
+        if not self._db or not self._session_id:
+            return False
+        try:
+            items = self._db.load_todos(self._session_id)
+            if items:
+                self._items = [self._validate(t) for t in items]
+                return True
+        except Exception:
+            pass
+        return False
 
     def write(self, todos: List[Dict[str, Any]], merge: bool = False) -> List[Dict[str, str]]:
         """
         Write todos. Returns the full current list after writing.
 
         Args:
-            todos: list of {id, content, status} dicts
+            todos: list of {id, content, status, priority?, severity?} dicts
             merge: if False, replace the entire list. If True, update
                    existing items by id and append new ones.
         """
@@ -63,6 +124,10 @@ class TodoStore:
                         status = str(t["status"]).strip().lower()
                         if status in VALID_STATUSES:
                             existing[item_id]["status"] = status
+                    if "priority" in t:
+                        existing[item_id]["priority"] = _normalize_priority(t["priority"])
+                    if "severity" in t:
+                        existing[item_id]["severity"] = _normalize_severity(t["severity"])
                 else:
                     # New item -- validate fully and append to end
                     validated = self._validate(t)
@@ -77,6 +142,7 @@ class TodoStore:
                     rebuilt.append(current)
                     seen.add(current["id"])
             self._items = rebuilt
+        self._persist()
         return self.read()
 
     def read(self) -> List[Dict[str, str]]:
@@ -117,7 +183,10 @@ class TodoStore:
         lines = ["[Your active task list was preserved across context compression]"]
         for item in active_items:
             marker = markers.get(item["status"], "[?]")
-            lines.append(f"- {marker} {item['id']}. {item['content']} ({item['status']})")
+            p = item.get("priority", "P2")
+            s = item.get("severity", "S2")
+            label = f"{p}{s}"
+            lines.append(f"- {marker} {item['id']}. {item['content']} ({item['status']}) [{label}]")
 
         return "\n".join(lines)
 
@@ -126,8 +195,8 @@ class TodoStore:
         """
         Validate and normalize a todo item.
 
-        Ensures required fields exist and status is valid.
-        Returns a clean dict with only {id, content, status}.
+        Ensures required fields exist and status/priority/severity are valid.
+        Returns a clean dict with {id, content, status, priority, severity}.
         """
         item_id = str(item.get("id", "")).strip()
         if not item_id:
@@ -141,7 +210,13 @@ class TodoStore:
         if status not in VALID_STATUSES:
             status = "pending"
 
-        return {"id": item_id, "content": content, "status": status}
+        return {
+            "id": item_id,
+            "content": content,
+            "status": status,
+            "priority": _normalize_priority(item.get("priority")),
+            "severity": _normalize_severity(item.get("severity")),
+        }
 
     @staticmethod
     def _dedupe_by_id(todos: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -217,7 +292,10 @@ TODO_SCHEMA = {
         "- merge=false (default): replace the entire list with a fresh plan\n"
         "- merge=true: update existing items by id, add any new ones\n\n"
         "Each item: {id: string, content: string, "
-        "status: pending|in_progress|completed|cancelled}\n"
+        "status: pending|in_progress|completed|cancelled, "
+        "priority?: P0|P1|P2|P3, severity?: S1|S2|S3}\n"
+        "Priority: P0=critical/blocking, P1=high, P2=normal(default), P3=low\n"
+        "Severity: S1=blocker/unusable, S2=major impact(default), S3=minor/cosmetic\n"
         "List order is priority. Only ONE item in_progress at a time.\n"
         "Mark items completed immediately when done. If something fails, "
         "cancel it and add a revised item.\n\n"
@@ -244,6 +322,16 @@ TODO_SCHEMA = {
                             "type": "string",
                             "enum": ["pending", "in_progress", "completed", "cancelled"],
                             "description": "Current status"
+                        },
+                        "priority": {
+                            "type": "string",
+                            "enum": ["P0", "P1", "P2", "P3"],
+                            "description": "Priority level (P0=critical, P1=high, P2=normal, P3=low). Default: P2"
+                        },
+                        "severity": {
+                            "type": "string",
+                            "enum": ["S1", "S2", "S3"],
+                            "description": "Severity/impact (S1=blocker, S2=major, S3=minor). Default: S2"
                         }
                     },
                     "required": ["id", "content", "status"]

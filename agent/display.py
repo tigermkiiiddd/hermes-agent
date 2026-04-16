@@ -886,12 +886,50 @@ def get_cute_tool_message(
     if tool_name == "todo":
         todos_arg = args.get("todos")
         merge = args.get("merge", False)
+        # Status markers
+        _markers = {"completed": "[x]", "in_progress": "[>]", "pending": "[ ]", "cancelled": "[~]"}
+        _rst = "\033[0m"
+        _prio_ansi = {
+            "P0": "\033[38;2;255;68;68m",     # red
+            "P1": "\033[38;2;255;170;0m",      # orange
+            "P2": "",                            # default
+            "P3": "\033[38;2;102;102;102m",     # gray
+        }
+        _sev_ansi = {
+            "S1": "\033[38;2;255;68;68m",       # red
+            "S2": "",                            # default
+            "S3": "\033[38;2;102;102;102m",      # gray
+        }
+        # Parse result JSON to get individual items
+        _todo_items = None
+        if result:
+            try:
+                import json as _json
+                _parsed = _json.loads(result)
+                if isinstance(_parsed, dict) and "todos" in _parsed:
+                    _todo_items = _parsed["todos"]
+            except Exception:
+                pass
+
         if todos_arg is None:
-            return _wrap(f"┊ 📋 plan      reading tasks  {dur}")
+            header = "reading tasks"
         elif merge:
-            return _wrap(f"┊ 📋 plan      update {len(todos_arg)} task(s)  {dur}")
+            header = f"update {len(todos_arg)} task(s)"
         else:
-            return _wrap(f"┊ 📋 plan      {len(todos_arg)} task(s)  {dur}")
+            header = f"{len(todos_arg)} task(s)"
+
+        lines = [_wrap(f"┊ 📋 plan      {header}  {dur}")]
+        if _todo_items:
+            for _ti in _todo_items:
+                _mk = _markers.get(_ti.get("status", ""), "[?]")
+                _p = _ti.get("priority", "P2")
+                _s = _ti.get("severity", "S2")
+                _pc = _prio_ansi.get(_p, "")
+                _sc = _sev_ansi.get(_s, "")
+                _label = f"{_pc}{_p}{_rst}{_sc}{_s}{_rst}" if (_pc or _sc) else f"{_p}{_s}"
+                _tc = _ti.get("content", "")
+                lines.append(_wrap(f"┊   {_mk} {_label}  {_tc}"))
+        return "\n".join(lines)
     if tool_name == "session_search":
         return _wrap(f"┊ 🔍 recall    \"{_trunc(args.get('query', ''), 35)}\"  {dur}")
     if tool_name == "memory":

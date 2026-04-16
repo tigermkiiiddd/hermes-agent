@@ -8111,9 +8111,60 @@ class HermesCLI:
         """Return extra prompt_toolkit widgets to insert into the TUI layout.
 
         Collects widgets registered by plugins via ctx.register_tui_widget().
-        Wrapper CLIs can still override this for additional widgets.
+        Also includes a persistent todo list widget (shows when tasks exist).
         """
         widgets = []
+        # --- Todo list widget (always registered, hidden when empty) ---
+        try:
+            from prompt_toolkit.layout.controls import FormattedTextControl
+            from prompt_toolkit.layout.containers import Window
+
+            _markers = {"completed": "[x]", "in_progress": "[>]", "pending": "[ ]", "cancelled": "[~]"}
+            _prio_colors = {"P0": "#ff4444", "P1": "#ffaa00", "P2": "", "P3": "#666666"}
+            _sev_colors = {"S1": "#ff4444", "S2": "", "S3": "#666666"}
+            _self = self
+
+            def _todo_fragments():
+                agent = getattr(_self, "agent", None)
+                if agent is None:
+                    return [("", "")]
+                items = agent.get_todo_display_items()
+                if not items:
+                    return [("", "")]
+                frags = [("", "")]
+                for item in items:
+                    mk = _markers.get(item.get("status", ""), "[?]")
+                    p = item.get("priority", "P2")
+                    s = item.get("severity", "S2")
+                    pc = _prio_colors.get(p, "")
+                    sc = _sev_colors.get(s, "")
+                    p_style = f"fg:{pc}" if pc else "class:status-bar-dim"
+                    s_style = f"fg:{sc}" if sc else "class:status-bar-dim"
+                    tc = item.get("content", "")
+                    frags.append(("class:status-bar-dim", f"  {mk} "))
+                    frags.append((p_style, p))
+                    frags.append((s_style, s))
+                    frags.append(("class:status-bar-dim", f"  {tc}"))
+                    frags.append(("", "\n"))
+                return frags
+
+            def _todo_height():
+                try:
+                    agent = getattr(_self, "agent", None)
+                    if agent is None:
+                        return 0
+                    items = agent.get_todo_display_items()
+                    return len(items) + 1 if items else 0
+                except Exception:
+                    return 0
+
+            widgets.append(Window(
+                content=FormattedTextControl(_todo_fragments),
+                height=_todo_height,
+            ))
+        except Exception:
+            pass
+        # --- Plugin widgets ---
         try:
             from hermes_cli.plugins import get_plugin_manager
             for factory in get_plugin_manager()._tui_widgets:
