@@ -92,6 +92,7 @@ def _build_child_system_prompt(
     context: Optional[str] = None,
     *,
     workspace_path: Optional[str] = None,
+    skills: Optional[List[str]] = None,
 ) -> str:
     """Build a focused system prompt for a child agent."""
     parts = [
@@ -107,6 +108,25 @@ def _build_child_system_prompt(
             f"{workspace_path}\n"
             "Use this exact path for local repository/workdir operations unless the task explicitly says otherwise."
         )
+
+    # ── Inject skill content ──
+    if skills:
+        _skill_parts = []
+        for _skill_name in skills:
+            try:
+                from tools.skills_tool import skill_view
+                _result = skill_view(_skill_name, task_id=None)
+                _parsed = json.loads(_result)
+                if _parsed.get("success"):
+                    _content = _parsed.get("content", "")
+                    if _content:
+                        _skill_parts.append(f"### {_skill_name}\n{_content}")
+            except Exception:
+                pass
+        if _skill_parts:
+            parts.append("\n[LOADED SKILLS]")
+            parts.extend(_skill_parts)
+
     parts.append(
         "\nComplete this task using the tools available to you. "
         "When finished, provide a clear, concise summary of:\n"
@@ -251,6 +271,8 @@ def _build_child_agent(
     # ACP transport overrides — lets a non-ACP parent spawn ACP child agents
     override_acp_command: Optional[str] = None,
     override_acp_args: Optional[List[str]] = None,
+    # Skill injection
+    skills: Optional[List[str]] = None,
 ):
     """
     Build a child AIAgent on the main thread (thread-safe construction).
@@ -291,7 +313,7 @@ def _build_child_agent(
         child_toolsets = _strip_blocked_tools(DEFAULT_TOOLSETS)
 
     workspace_hint = _resolve_workspace_hint(parent_agent)
-    child_prompt = _build_child_system_prompt(goal, context, workspace_path=workspace_hint)
+    child_prompt = _build_child_system_prompt(goal, context, workspace_path=workspace_hint, skills=skills)
     # Extract parent's API key so subagents inherit auth (e.g. Nous Portal).
     parent_api_key = getattr(parent_agent, "api_key", None)
     if (not parent_api_key) and hasattr(parent_agent, "_client_kwargs"):
@@ -401,6 +423,7 @@ def _run_single_child(
     goal: str,
     child=None,
     parent_agent=None,
+    skills: Optional[List[str]] = None,
     **_kwargs,
 ) -> Dict[str, Any]:
     """
@@ -628,6 +651,7 @@ def delegate_task(
     max_iterations: Optional[int] = None,
     acp_command: Optional[str] = None,
     acp_args: Optional[List[str]] = None,
+    skills: Optional[List[str]] = None,
     parent_agent=None,
 ) -> str:
     """
@@ -720,6 +744,7 @@ def delegate_task(
                 override_api_mode=creds["api_mode"],
                 override_acp_command=t.get("acp_command") or acp_command,
                 override_acp_args=t.get("acp_args") or acp_args,
+                skills=t.get("skills") or skills,
             )
             # Override with correct parent tool names (before child construction mutated global)
             child._delegate_saved_tool_names = _parent_tool_names
@@ -1040,6 +1065,11 @@ DELEGATE_TASK_SCHEMA = {
                             "items": {"type": "string"},
                             "description": "Per-task ACP args override.",
                         },
+                        "skills": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Per-task skill override. Replaces top-level skills for this task.",
+                        },
                     },
                     "required": ["goal"],
                 },
@@ -1076,6 +1106,16 @@ DELEGATE_TASK_SCHEMA = {
                     "Only used when acp_command is set. Example: ['--acp', '--stdio', '--model', 'claude-opus-4-6']"
                 ),
             },
+            "skills": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": (
+                    "Skill names to inject into the subagent's system prompt. "
+                    "Supports qualified names like 'plugin:skill' and bare names "
+                    "like 'debugging'. The full skill content is loaded and "
+                    "included as context for the subagent."
+                ),
+            },
         },
         "required": [],
     },
@@ -1097,6 +1137,7 @@ registry.register(
         max_iterations=args.get("max_iterations"),
         acp_command=args.get("acp_command"),
         acp_args=args.get("acp_args"),
+        skills=args.get("skills"),
         parent_agent=kw.get("parent_agent")),
     check_fn=check_delegate_requirements,
     emoji="🔀",
