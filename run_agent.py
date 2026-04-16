@@ -3494,6 +3494,25 @@ class AIAgent:
             timestamp_line += f"\nProvider: {self.provider}"
         prompt_parts.append(timestamp_line)
 
+        # Project context — inject current project info into system prompt
+        if "project" in self.valid_tool_names and self.session_id:
+            try:
+                from hermes_state import SessionDB as _SDB
+                _p_home = Path(os.environ.get("HERMES_HOME", Path.home() / ".hermes"))
+                _p_db = _SDB(_p_home / "state.db")
+                _p_session = _p_db.get_session(self.session_id)
+                if _p_session and _p_session.get("project_id"):
+                    _p_info = _p_db.get_project(_p_session["project_id"])
+                    if _p_info:
+                        _proj_lines = [f"Active Project: {_p_info['name']}"]
+                        if _p_info.get("path"):
+                            _proj_lines.append(f"Project Directory: {_p_info['path']}")
+                        if _p_info.get("description"):
+                            _proj_lines.append(f"Project Description: {_p_info['description']}")
+                        prompt_parts.append("\n".join(_proj_lines))
+            except Exception:
+                pass
+
         # Alibaba Coding Plan API always returns "glm-4.7" as model name regardless
         # of the requested model. Inject explicit model identity into the system prompt
         # so the agent can correctly report which model it is (workaround for API bug).
@@ -7821,6 +7840,23 @@ class AIAgent:
                 tool_duration = time.time() - tool_start_time
                 if self._should_emit_quiet_tool_messages():
                     self._vprint(f"  {_get_cute_tool_message_impl('memory', function_args, tool_duration, result=function_result)}")
+            elif function_name == "project":
+                from tools.project_tool import project_tool as _project_tool
+                function_result = _project_tool(
+                    action=function_args.get("action", ""),
+                    name=function_args.get("name"),
+                    path=function_args.get("path"),
+                    description=function_args.get("description"),
+                    git_url=function_args.get("git_url"),
+                    session_id=self.session_id,
+                )
+                tool_duration = time.time() - tool_start_time
+                if self._should_emit_quiet_tool_messages():
+                    self._vprint(f"  {_get_cute_tool_message_impl('project', function_args, tool_duration, result=function_result)}")
+                # If project was set/unset, invalidate system prompt so project
+                # context gets refreshed on next turn.
+                if function_args.get("action") in ("set", "unset") and self._cached_system_prompt is not None:
+                    self._invalidate_system_prompt()
             elif function_name == "clarify":
                 from tools.clarify_tool import clarify_tool as _clarify_tool
                 function_result = _clarify_tool(

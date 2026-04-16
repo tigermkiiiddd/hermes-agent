@@ -31,11 +31,21 @@ T = TypeVar("T")
 
 DEFAULT_DB_PATH = get_hermes_home() / "state.db"
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_version (
     version INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS projects (
+    name TEXT PRIMARY KEY,
+    path TEXT,
+    description TEXT,
+    config TEXT,
+    git_url TEXT,
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS sessions (
@@ -65,7 +75,9 @@ CREATE TABLE IF NOT EXISTS sessions (
     cost_source TEXT,
     pricing_version TEXT,
     title TEXT,
-    FOREIGN KEY (parent_session_id) REFERENCES sessions(id)
+    project_id TEXT,
+    FOREIGN KEY (parent_session_id) REFERENCES sessions(id),
+    FOREIGN KEY (project_id) REFERENCES projects(name)
 );
 
 CREATE TABLE IF NOT EXISTS messages (
@@ -339,7 +351,28 @@ class SessionDB:
                 cursor.execute("UPDATE schema_version SET version = 6")
 
             if current_version < 7:
-                # v7: session_todos table for persistent todo state
+                # v7: add projects table, sessions.project_id column, and session_todos
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS projects (
+                        name TEXT PRIMARY KEY,
+                        path TEXT,
+                        description TEXT,
+                        config TEXT,
+                        git_url TEXT,
+                        created_at REAL NOT NULL,
+                        updated_at REAL NOT NULL
+                    )
+                """)
+                try:
+                    cursor.execute('ALTER TABLE sessions ADD COLUMN "project_id" TEXT')
+                except sqlite3.OperationalError:
+                    pass  # Column already exists
+                try:
+                    cursor.execute(
+                        "CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project_id)"
+                    )
+                except sqlite3.OperationalError:
+                    pass
                 cursor.execute("""
                     CREATE TABLE IF NOT EXISTS session_todos (
                         session_id TEXT NOT NULL,
@@ -350,6 +383,14 @@ class SessionDB:
                     )
                 """)
                 cursor.execute("UPDATE schema_version SET version = 7")
+
+            if current_version < 8:
+                # v8: add git_url column to projects table
+                try:
+                    cursor.execute('ALTER TABLE projects ADD COLUMN git_url TEXT')
+                except sqlite3.OperationalError:
+                    pass  # Column already exists
+                cursor.execute("UPDATE schema_version SET version = 8")
 
         # Unique title index — always ensure it exists (safe to run after migrations
         # since the title column is guaranteed to exist at this point)
@@ -382,13 +423,14 @@ class SessionDB:
         system_prompt: str = None,
         user_id: str = None,
         parent_session_id: str = None,
+        project_id: str = None,
     ) -> str:
         """Create a new session record. Returns the session_id."""
         def _do(conn):
             conn.execute(
                 """INSERT OR IGNORE INTO sessions (id, source, user_id, model, model_config,
-                   system_prompt, parent_session_id, started_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                   system_prompt, parent_session_id, project_id, started_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     session_id,
                     source,
@@ -397,6 +439,7 @@ class SessionDB:
                     json.dumps(model_config) if model_config else None,
                     system_prompt,
                     parent_session_id,
+                    project_id,
                     time.time(),
                 ),
             )
@@ -1287,3 +1330,99 @@ class SessionDB:
             return json.loads(row["items"] if isinstance(row, sqlite3.Row) else row[0])
         except (json.JSONDecodeError, TypeError):
             return None
+
+    # =========================================================================
+    # Projects
+    # =========================================================================
+
+    def create_project(
+        self,
+        name: str,
+        path: str = None,
+        description: str = None,
+        config: Dict[str, Any] = None,
+        git_url: str = None,
+    ) -> str:
+        """Create a project. Returns the name."""
+        now = time.time()
+        def _do(conn):
+            conn.execute(
+                """INSERT OR IGNORE INTO projects (name, path, description, config, git_url, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (name, path, description, json.dumps(config) if config else None, git_url, now, now),
+            )
+        self._execute_write(_do)
+        return name
+
+    def update_project(
+        self,
+        name: str,
+        path: str = ...,
+        description: str = ...,
+        config: Dict[str, Any] = ...,
+        git_url: str = ...,
+    ) -> bool:
+        """Update project fields. Use ... (Ellipsis) to skip a field. Returns True if found."""
+        now = time.time()
+        def _do(conn):
+            row = conn.execute("SELECT 1 FROM projects WHERE name = ?", (name,)).fetchone()
+            if not row:
+                return False
+            sets, vals = [], []
+            if path is not ...:
+                sets.append("path = ?"); vals.append(path)
+            if description is not ...:
+                sets.append("description = ?"); vals.append(description)
+            if config is not ...:
+                sets.append("config = ?"); vals.append(json.dumps(config) if config else None)
+            if git_url is not ...:
+                sets.append("git_url = ?"); vals.append(git_url)
+            if not sets:
+                return True
+            sets.append("updated_at = ?"); vals.append(now)
+            vals.append(name)
+            conn.execute(f"UPDATE projects SET {', '.join(sets)} WHERE name = ?", vals)
+            return True
+        return self._execute_write(_do)
+
+    def delete_project(self, name: str) -> bool:
+        """Delete a project. Sessions referencing it keep project_id as NULL. Returns True if found."""
+        def _do(conn):
+            row = conn.execute("SELECT 1 FROM projects WHERE name = ?", (name,)).fetchone()
+            if not row:
+                return False
+            conn.execute("UPDATE sessions SET project_id = NULL WHERE project_id = ?", (name,))
+            conn.execute("DELETE FROM projects WHERE name = ?", (name,))
+            return True
+        return self._execute_write(_do)
+
+    def get_project(self, name: str) -> Optional[Dict[str, Any]]:
+        """Get a single project by name."""
+        cursor = self._conn.execute("SELECT * FROM projects WHERE name = ?", (name,))
+        row = cursor.fetchone()
+        if not row:
+            return None
+        return dict(row)
+
+    def list_projects(self) -> List[Dict[str, Any]]:
+        """List all projects ordered by updated_at desc."""
+        cursor = self._conn.execute("SELECT * FROM projects ORDER BY updated_at DESC")
+        return [dict(row) for row in cursor.fetchall()]
+
+    def set_session_project(self, session_id: str, project_id: Optional[str]) -> bool:
+        """Associate or dissociate a session with a project."""
+        def _do(conn):
+            conn.execute(
+                "UPDATE sessions SET project_id = ? WHERE id = ?",
+                (project_id, session_id),
+            )
+        self._execute_write(_do)
+        return True
+
+    def get_sessions_by_project(self, project_id: str) -> List[Dict[str, Any]]:
+        """Get all sessions for a project."""
+        cursor = self._conn.execute(
+            "SELECT * FROM sessions WHERE project_id = ? ORDER BY started_at DESC",
+            (project_id,),
+        )
+        return [dict(row) for row in cursor.fetchall()]

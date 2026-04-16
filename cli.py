@@ -1606,6 +1606,7 @@ class HermesCLI:
         verbose: bool = False,
         compact: bool = False,
         resume: str = None,
+        project: str = None,
         checkpoints: bool = False,
         pass_session_id: bool = False,
     ):
@@ -1810,6 +1811,9 @@ class HermesCLI:
             timestamp_str = self.session_start.strftime("%Y%m%d_%H%M%S")
             short_uuid = uuid.uuid4().hex[:6]
             self.session_id = f"{timestamp_str}_{short_uuid}"
+        
+        # Project association (--project CLI arg or /project set)
+        self._initial_project_id: Optional[str] = project
         
         # History file for persistent input recall across sessions
         self._history_file = _hermes_home / ".hermes_history"
@@ -4161,13 +4165,135 @@ class HermesCLI:
                             "max_iterations": self.max_turns,
                             "reasoning_config": self.reasoning_config,
                         },
+                        project_id=self._initial_project_id,
                     )
                 except Exception:
                     pass
             self._notify_session_boundary("on_session_reset")
 
+        # Apply project CWD if project has a path
+        if self._initial_project_id and self._session_db:
+            proj = self._session_db.get_project(self._initial_project_id)
+            if proj and proj.get("path"):
+                os.environ["TERMINAL_CWD"] = proj["path"]
+
         if not silent:
             print("(^_^)v New session started!")
+
+    def _handle_project_command(self, cmd_original: str) -> None:
+        """Handle /project subcommands: list, set, create, unset, delete, info."""
+        if not self._session_db:
+            _cprint("\033[1;31mSession database not available.\033[0m")
+            return
+        parts = cmd_original.split()
+        sub = parts[1].lower() if len(parts) > 1 else "list"
+
+        if sub in ("list", "ls"):
+            projects = self._session_db.list_projects()
+            if not projects:
+                _cprint("  No projects. Use \033[1m/project create <name> [path]\033[0m to create one.")
+                return
+            current = None
+            if self._active_agent_ref:
+                meta = self._session_db.get_session(self._active_agent_ref.session_id)
+                if meta:
+                    current = meta.get("project_id")
+            for p in projects:
+                marker = " \033[1;32m<-- active\033[0m" if current and p["name"] == current else ""
+                path_str = f"  {p['path']}" if p.get("path") else "  (no path)"
+                desc = f"  {p['description']}" if p.get("description") else ""
+                _cprint(f"  \033[1m{p['name']}\033[0m{path_str}{desc}{marker}")
+        elif sub == "set":
+            if len(parts) < 3:
+                _cprint("  Usage: /project set <name>")
+                return
+            name = parts[2]
+            proj = self._session_db.get_project(name)
+            if not proj:
+                _cprint(f"\033[1;31m  Project '{name}' not found.\033[0m")
+                return
+            if not self._active_agent_ref:
+                _cprint("\033[1;31m  No active session.\033[0m")
+                return
+            self._session_db.set_session_project(self._active_agent_ref.session_id, name)
+            # Update CWD if project has a path
+            if proj.get("path"):
+                os.environ["TERMINAL_CWD"] = proj["path"]
+                _cprint(f"  Project set to \033[1m{name}\033[0m (cwd: {proj['path']})")
+            else:
+                _cprint(f"  Project set to \033[1m{name}\033[0m (no directory)")
+        elif sub == "create":
+            if len(parts) < 3:
+                _cprint("  Usage: /project create <name> [path] [--desc description]")
+                return
+            name = parts[2]
+            path = None
+            desc = None
+            rest = parts[3:]
+            i = 0
+            while i < len(rest):
+                if rest[i] == "--desc" and i + 1 < len(rest):
+                    desc = rest[i + 1]
+                    i += 2
+                elif rest[i].startswith("--desc="):
+                    desc = rest[i][7:]
+                    i += 1
+                elif path is None:
+                    path = rest[i]
+                    i += 1
+                else:
+                    i += 1
+            if path:
+                path = str(Path(path).expanduser().resolve())
+            existing = self._session_db.get_project(name)
+            if existing:
+                _cprint(f"\033[1;31m  Project '{name}' already exists.\033[0m")
+                return
+            self._session_db.create_project(name, path=path, description=desc)
+            _cprint(f"  Project \033[1m{name}\033[0m created." + (f" Path: {path}" if path else ""))
+        elif sub == "unset":
+            if not self._active_agent_ref:
+                _cprint("\033[1;31m  No active session.\033[0m")
+                return
+            self._session_db.set_session_project(self._active_agent_ref.session_id, None)
+            # Reset CWD to default
+            messaging_cwd = os.getenv("MESSAGING_CWD", str(Path.home()))
+            os.environ["TERMINAL_CWD"] = messaging_cwd
+            _cprint("  Project unset.")
+        elif sub == "delete":
+            if len(parts) < 3:
+                _cprint("  Usage: /project delete <name>")
+                return
+            name = parts[2]
+            ok = self._session_db.delete_project(name)
+            if ok:
+                _cprint(f"  Project \033[1m{name}\033[0m deleted.")
+            else:
+                _cprint(f"\033[1;31m  Project '{name}' not found.\033[0m")
+        elif sub == "info":
+            if len(parts) >= 3:
+                name = parts[2]
+            elif self._active_agent_ref:
+                meta = self._session_db.get_session(self._active_agent_ref.session_id)
+                name = meta.get("project_id") if meta else None
+            else:
+                name = None
+            if not name:
+                _cprint("  No project associated. Use /project info <name> or /project set first.")
+                return
+            proj = self._session_db.get_project(name)
+            if not proj:
+                _cprint(f"\033[1;31m  Project '{name}' not found.\033[0m")
+                return
+            _cprint(f"  \033[1m{proj['name']}\033[0m")
+            if proj.get("path"):
+                _cprint(f"  Path: {proj['path']}")
+            if proj.get("description"):
+                _cprint(f"  Description: {proj['description']}")
+            sessions = self._session_db.get_sessions_by_project(name)
+            _cprint(f"  Sessions: {len(sessions)}")
+        else:
+            _cprint("  Usage: /project [list|set|create|unset|delete|info] [name] [path] [--desc ...]")
 
     def _handle_resume_command(self, cmd_original: str) -> None:
         """Handle /resume <session_id_or_title> — switch to a previous session mid-conversation."""
@@ -4293,6 +4419,9 @@ class HermesCLI:
             pass
 
         # Create the new session with parent link
+        # Inherit project from parent session
+        _parent_meta = self._session_db.get_session(parent_session_id) if parent_session_id else None
+        _parent_project = _parent_meta.get("project_id") if _parent_meta else None
         try:
             self._session_db.create_session(
                 session_id=new_session_id,
@@ -4303,6 +4432,7 @@ class HermesCLI:
                     "reasoning_config": self.reasoning_config,
                 },
                 parent_session_id=parent_session_id,
+                project_id=_parent_project,
             )
         except Exception as e:
             _cprint(f"  Failed to create branch session: {e}")
@@ -5429,6 +5559,8 @@ class HermesCLI:
             self.new_session()
         elif canonical == "resume":
             self._handle_resume_command(cmd_original)
+        elif canonical == "project":
+            self._handle_project_command(cmd_original)
         elif canonical == "model":
             self._handle_model_switch(cmd_original)
         elif canonical == "provider":
@@ -9934,6 +10066,7 @@ def main(
     list_toolsets: bool = False,
     gateway: bool = False,
     resume: str = None,
+    project: str = None,
     worktree: bool = False,
     w: bool = False,
     checkpoints: bool = False,
@@ -10045,6 +10178,7 @@ def main(
         verbose=verbose,
         compact=compact,
         resume=resume,
+        project=project,
         checkpoints=checkpoints,
         pass_session_id=pass_session_id,
     )
