@@ -753,6 +753,25 @@ def build_skills_system_prompt(
             except Exception as e:
                 logger.debug("Could not read external skill description %s: %s", desc_file, e)
 
+    # ── Plugin skills ────────────────────────────────────────────────
+    # Merge plugin-registered skills into the index so they appear in
+    # <available_skills>.  Plugin skills use qualified names
+    # ("plugin:skill") and carry their own category.
+    try:
+        from hermes_cli.plugins import get_plugin_manager, discover_plugins
+        discover_plugins()  # idempotent
+        _pm = get_plugin_manager()
+        for _qn, _entry in _pm._plugin_skills.items():
+            _cat = _entry.get("category") or "general"
+            _desc = _entry.get("description", "")
+            _qname = _qn  # e.g. "superpowers:writing-plans"
+            # Don't overwrite local skills with same name
+            if _qname not in seen_skill_names:
+                seen_skill_names.add(_qname)
+                skills_by_category.setdefault(_cat, []).append((_qname, _desc))
+    except Exception as _e:
+        logger.debug("Could not merge plugin skills into index: %s", _e)
+
     if not skills_by_category:
         result = ""
     else:

@@ -394,14 +394,23 @@ class PluginContext:
         name: str,
         path: Path,
         description: str = "",
+        category: str = "",
     ) -> None:
         """Register a read-only skill provided by this plugin.
 
         The skill becomes resolvable as ``'<plugin_name>:<name>'`` via
-        ``skill_view()``.  It does **not** enter the flat
-        ``~/.hermes/skills/`` tree and is **not** listed in the system
-        prompt's ``<available_skills>`` index — plugin skills are
-        opt-in explicit loads only.
+        ``skill_view()`` and is listed in the system prompt's
+        ``<available_skills>`` index under its *category*.
+
+        Args:
+            name: Bare skill name (no ``:`` allowed).
+            path: Path to the SKILL.md file.
+            description: Short one-line description.
+            category: Skill group (e.g. ``"mlops/training"``).  When
+                auto-discovered from a ``skills/`` subdirectory the
+                category is derived from the directory structure —
+                ``skills/mlops/axolotl/SKILL.md`` → category ``"mlops"``.
+                Explicitly passing *category* overrides the derived value.
 
         Raises:
             ValueError: if *name* contains ``':'`` or invalid characters.
@@ -428,10 +437,11 @@ class PluginContext:
             "plugin": self.manifest.name,
             "bare_name": name,
             "description": description,
+            "category": category or "general",
         }
         logger.debug(
-            "Plugin %s registered skill: %s",
-            self.manifest.name, qualified,
+            "Plugin %s registered skill: %s [%s]",
+            self.manifest.name, qualified, category or "general",
         )
 
 
@@ -632,8 +642,22 @@ class PluginManager:
                     if _skills_dir.is_dir():
                         for _skill_md in _skills_dir.rglob("SKILL.md"):
                             _bare = _skill_md.parent.name
+                            # Derive category from directory structure, matching
+                            # the convention used by prompt_builder for local skills:
+                            #   skills/mlops/axolotl/SKILL.md -> category "mlops"
+                            #   skills/mlops/training/unsloth/SKILL.md -> category "mlops/training"
+                            #   skills/foo/SKILL.md -> category "general"
                             try:
-                                ctx.register_skill(_bare, _skill_md)
+                                _rel = _skill_md.parent.relative_to(_skills_dir)
+                                _parts = _rel.parts
+                                if len(_parts) >= 2:
+                                    _cat = "/".join(_parts[:-1])
+                                else:
+                                    _cat = "general"
+                            except ValueError:
+                                _cat = "general"
+                            try:
+                                ctx.register_skill(_bare, _skill_md, category=_cat)
                             except (ValueError, FileNotFoundError) as _e:
                                 logger.debug(
                                     "Plugin '%s' auto-skill '%s' skipped: %s",
@@ -647,6 +671,30 @@ class PluginManager:
                             logger.info(
                                 "Plugin '%s' auto-discovered %d skill(s)",
                                 manifest.name, _auto_count,
+                            )
+
+                    # ── Auto-discover mcp.json ──────────────────────
+                    # If the plugin directory contains an mcp.json file,
+                    # each server entry is auto-registered via
+                    # ctx.register_mcp_server().
+                    _mcp_file = _plugin_dir / "mcp.json"
+                    if _mcp_file.is_file():
+                        try:
+                            import json as _json
+                            _mcp_data = _json.loads(_mcp_file.read_text(encoding="utf-8"))
+                            _mcp_servers = _mcp_data.get("mcpServers") or _mcp_data.get("servers") or {}
+                            for _srv_name, _srv_cfg in _mcp_servers.items():
+                                if isinstance(_srv_cfg, dict):
+                                    ctx.register_mcp_server(_srv_name, _srv_cfg)
+                            if _mcp_servers:
+                                logger.info(
+                                    "Plugin '%s' auto-discovered %d MCP server(s)",
+                                    manifest.name, len(_mcp_servers),
+                                )
+                        except Exception as _e:
+                            logger.warning(
+                                "Plugin '%s' failed to parse mcp.json: %s",
+                                manifest.name, _e,
                             )
 
         except Exception as exc:
@@ -775,14 +823,32 @@ class PluginManager:
         entry = self._plugin_skills.get(qualified_name)
         return entry["path"] if entry else None
 
-    def list_plugin_skills(self, plugin_name: str) -> List[str]:
-        """Return sorted bare names of all skills registered by *plugin_name*."""
+    def list_plugin_skills(self, plugin_name: str, detailed: bool = False):
+        """Return skill info for all skills registered by *plugin_name*.
+
+        Args:
+            plugin_name: Plugin namespace.
+            detailed: If True, return list of dicts with bare_name,
+                description, and category.  Otherwise return sorted bare
+                names (backward compatible).
+        """
         prefix = f"{plugin_name}:"
-        return sorted(
-            e["bare_name"]
+        entries = [
+            (qn, e)
             for qn, e in self._plugin_skills.items()
             if qn.startswith(prefix)
-        )
+        ]
+        if detailed:
+            return [
+                {
+                    "qualified_name": qn,
+                    "bare_name": e["bare_name"],
+                    "description": e.get("description", ""),
+                    "category": e.get("category", "general"),
+                }
+                for qn, e in sorted(entries, key=lambda x: x[0])
+            ]
+        return sorted(e["bare_name"] for _, e in entries)
 
     def remove_plugin_skill(self, qualified_name: str) -> None:
         """Remove a stale registry entry (silently ignores missing keys)."""

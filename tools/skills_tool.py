@@ -685,6 +685,25 @@ def skills_list(category: str = None, task_id: str = None) -> str:
                 ensure_ascii=False,
             )
 
+        # ── Merge plugin skills ──────────────────────────────────────
+        try:
+            from hermes_cli.plugins import get_plugin_manager, discover_plugins
+            discover_plugins()  # idempotent
+            _pm = get_plugin_manager()
+            _plugin_names = set(s["name"] for s in all_skills)
+            for _qn, _entry in _pm._plugin_skills.items():
+                if _qn in _plugin_names:
+                    continue
+                _plugin_names.add(_qn)
+                all_skills.append({
+                    "name": _qn,
+                    "category": _entry.get("category", "general"),
+                    "description": _entry.get("description", ""),
+                    "source": "plugin",
+                })
+        except Exception:
+            pass
+
         # Filter by category if specified
         if category:
             all_skills = [s for s in all_skills if s.get("category") == category]
