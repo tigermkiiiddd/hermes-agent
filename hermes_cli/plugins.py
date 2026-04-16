@@ -62,6 +62,7 @@ VALID_HOOKS: Set[str] = {
     "on_session_end",
     "on_session_finalize",
     "on_session_reset",
+    "pre_background_review",
 }
 
 ENTRY_POINTS_GROUP = "hermes_agent.plugins"
@@ -312,6 +313,51 @@ class PluginContext:
 
     # -- skill registration -------------------------------------------------
 
+    def register_mcp_server(self, name: str, config: dict) -> None:
+        """Register an MCP server configuration from a plugin.
+
+        Registered servers are merged into the MCP config on load.
+        Plugin servers take priority over config.yaml entries on name conflict.
+
+        Args:
+            name: Server name (must be unique across all plugin servers).
+            config: Server config dict with command/args/env (stdio) or
+                    url/headers (HTTP), plus optional timeout/auth overrides.
+        """
+        if not name or not isinstance(config, dict):
+            logger.warning(
+                "Plugin '%s' tried to register an MCP server with invalid "
+                "name or config. Skipping.",
+                self.manifest.name,
+            )
+            return
+        self._manager._mcp_servers[name] = config
+        logger.info(
+            "Plugin '%s' registered MCP server: %s",
+            self.manifest.name, name,
+        )
+
+    def register_tui_widget(self, factory: Callable) -> None:
+        """Register a prompt_toolkit widget factory from a plugin.
+
+        The factory is a callable that takes no arguments and returns a
+        prompt_toolkit Container.  Widgets are inserted between the spacer
+        and status bar in the CLI layout.
+
+        Args:
+            factory: Zero-argument callable returning a Container.
+        """
+        if not callable(factory):
+            logger.warning(
+                "Plugin '%s' tried to register a non-callable TUI widget. Skipping.",
+                self.manifest.name,
+            )
+            return
+        self._manager._tui_widgets.append(factory)
+        logger.debug(
+            "Plugin %s registered TUI widget", self.manifest.name,
+        )
+
     def register_skill(
         self,
         name: str,
@@ -376,6 +422,10 @@ class PluginManager:
         self._cli_ref = None  # Set by CLI after plugin discovery
         # Plugin skill registry: qualified name → metadata dict.
         self._plugin_skills: Dict[str, Dict[str, Any]] = {}
+        # MCP servers registered by plugins: name → config dict
+        self._mcp_servers: Dict[str, dict] = {}
+        # TUI widget factories registered by plugins
+        self._tui_widgets: List[Callable] = []
 
     # -----------------------------------------------------------------------
     # Public
@@ -539,6 +589,34 @@ class PluginManager:
                     if self._plugin_commands[c].get("plugin") == manifest.name
                 ]
                 loaded.enabled = True
+
+                # ── Auto-discover skills/ directory ──────────────────
+                # If the plugin directory contains a skills/ subdirectory,
+                # each SKILL.md within it is auto-registered via
+                # ctx.register_skill(). This provides a zero-code path for
+                # Claude-style skill bundles.
+                if manifest.source in ("user", "project") and manifest.path:
+                    _plugin_dir = Path(manifest.path)
+                    _skills_dir = _plugin_dir / "skills"
+                    if _skills_dir.is_dir():
+                        for _skill_md in _skills_dir.rglob("SKILL.md"):
+                            _bare = _skill_md.parent.name
+                            try:
+                                ctx.register_skill(_bare, _skill_md)
+                            except (ValueError, FileNotFoundError) as _e:
+                                logger.debug(
+                                    "Plugin '%s' auto-skill '%s' skipped: %s",
+                                    manifest.name, _bare, _e,
+                                )
+                        _auto_count = sum(
+                            1 for q in self._plugin_skills
+                            if q.startswith(f"{manifest.name}:")
+                        )
+                        if _auto_count:
+                            logger.info(
+                                "Plugin '%s' auto-discovered %d skill(s)",
+                                manifest.name, _auto_count,
+                            )
 
         except Exception as exc:
             loaded.error = str(exc)
