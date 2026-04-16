@@ -312,6 +312,51 @@ class PluginContext:
 
     # -- skill registration -------------------------------------------------
 
+    def register_mcp_server(self, name: str, config: dict) -> None:
+        """Register an MCP server configuration from a plugin.
+
+        Registered servers are merged into the MCP config on load.
+        Plugin servers take priority over config.yaml entries on name conflict.
+
+        Args:
+            name: Server name (must be unique across all plugin servers).
+            config: Server config dict with command/args/env (stdio) or
+                    url/headers (HTTP), plus optional timeout/auth overrides.
+        """
+        if not name or not isinstance(config, dict):
+            logger.warning(
+                "Plugin '%s' tried to register an MCP server with invalid "
+                "name or config. Skipping.",
+                self.manifest.name,
+            )
+            return
+        self._manager._mcp_servers[name] = config
+        logger.info(
+            "Plugin '%s' registered MCP server: %s",
+            self.manifest.name, name,
+        )
+
+    def register_tui_widget(self, factory: Callable) -> None:
+        """Register a prompt_toolkit widget factory from a plugin.
+
+        The factory is a callable that takes no arguments and returns a
+        prompt_toolkit Container.  Widgets are inserted between the spacer
+        and status bar in the CLI layout.
+
+        Args:
+            factory: Zero-argument callable returning a Container.
+        """
+        if not callable(factory):
+            logger.warning(
+                "Plugin '%s' tried to register a non-callable TUI widget. Skipping.",
+                self.manifest.name,
+            )
+            return
+        self._manager._tui_widgets.append(factory)
+        logger.debug(
+            "Plugin %s registered TUI widget", self.manifest.name,
+        )
+
     def register_skill(
         self,
         name: str,
@@ -376,6 +421,10 @@ class PluginManager:
         self._cli_ref = None  # Set by CLI after plugin discovery
         # Plugin skill registry: qualified name → metadata dict.
         self._plugin_skills: Dict[str, Dict[str, Any]] = {}
+        # MCP servers registered by plugins: name → config dict
+        self._mcp_servers: Dict[str, dict] = {}
+        # TUI widget factories registered by plugins
+        self._tui_widgets: List[Callable] = []
 
     # -----------------------------------------------------------------------
     # Public

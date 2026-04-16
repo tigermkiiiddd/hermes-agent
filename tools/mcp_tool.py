@@ -1305,20 +1305,35 @@ def _load_mcp_config() -> Dict[str, dict]:
 
     ``${ENV_VAR}`` placeholders in string values are resolved from
     ``os.environ`` (which includes ``~/.hermes/.env`` loaded at startup).
+
+    Plugin-registered MCP servers (via ``ctx.register_mcp_server()``) are
+    merged in.  On name conflict, plugin servers take priority.
     """
     try:
         from hermes_cli.config import load_config
         config = load_config()
         servers = config.get("mcp_servers")
         if not servers or not isinstance(servers, dict):
-            return {}
+            config_servers = {}
+        else:
+            config_servers = {name: cfg for name, cfg in servers.items()}
         # Ensure .env vars are available for interpolation
         try:
             from hermes_cli.env_loader import load_hermes_dotenv
             load_hermes_dotenv()
         except Exception:
             pass
-        return {name: _interpolate_env_vars(cfg) for name, cfg in servers.items()}
+        # Merge plugin-registered MCP servers (plugins take priority)
+        try:
+            from hermes_cli.plugins import get_plugin_manager
+            plugin_servers = get_plugin_manager()._mcp_servers
+            if plugin_servers:
+                config_servers = {**config_servers, **plugin_servers}
+        except Exception:
+            pass  # Plugin system not available (e.g. during tests)
+        if not config_servers:
+            return {}
+        return {name: _interpolate_env_vars(cfg) for name, cfg in config_servers.items()}
     except Exception as exc:
         logger.debug("Failed to load MCP config: %s", exc)
         return {}
