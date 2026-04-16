@@ -62,6 +62,7 @@ VALID_HOOKS: Set[str] = {
     "on_session_end",
     "on_session_finalize",
     "on_session_reset",
+    "pre_background_review",
 }
 
 ENTRY_POINTS_GROUP = "hermes_agent.plugins"
@@ -588,6 +589,34 @@ class PluginManager:
                     if self._plugin_commands[c].get("plugin") == manifest.name
                 ]
                 loaded.enabled = True
+
+                # ── Auto-discover skills/ directory ──────────────────
+                # If the plugin directory contains a skills/ subdirectory,
+                # each SKILL.md within it is auto-registered via
+                # ctx.register_skill(). This provides a zero-code path for
+                # Claude-style skill bundles.
+                if manifest.source in ("user", "project") and manifest.path:
+                    _plugin_dir = Path(manifest.path)
+                    _skills_dir = _plugin_dir / "skills"
+                    if _skills_dir.is_dir():
+                        for _skill_md in _skills_dir.rglob("SKILL.md"):
+                            _bare = _skill_md.parent.name
+                            try:
+                                ctx.register_skill(_bare, _skill_md)
+                            except (ValueError, FileNotFoundError) as _e:
+                                logger.debug(
+                                    "Plugin '%s' auto-skill '%s' skipped: %s",
+                                    manifest.name, _bare, _e,
+                                )
+                        _auto_count = sum(
+                            1 for q in self._plugin_skills
+                            if q.startswith(f"{manifest.name}:")
+                        )
+                        if _auto_count:
+                            logger.info(
+                                "Plugin '%s' auto-discovered %d skill(s)",
+                                manifest.name, _auto_count,
+                            )
 
         except Exception as exc:
             loaded.error = str(exc)
