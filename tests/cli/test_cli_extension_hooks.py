@@ -59,9 +59,11 @@ def _make_cli(**kwargs):
 
 
 class TestExtensionHookDefaults:
-    def test_extra_tui_widgets_default_empty(self):
+    def test_extra_tui_widgets_includes_todo(self):
+        """_get_extra_tui_widgets now always includes a todo list widget."""
         cli = _make_cli()
-        assert cli._get_extra_tui_widgets() == []
+        widgets = cli._get_extra_tui_widgets()
+        assert len(widgets) >= 1  # todo widget at minimum
 
     def test_register_extra_tui_keybindings_default_noop(self):
         cli = _make_cli()
@@ -87,8 +89,10 @@ class TestExtensionHookDefaults:
             voice_status_bar="voice-status",
             completions_menu="completions-menu",
         )
-        # First element is Window(height=0), rest are the named widgets
-        assert children[1:] == [
+        # First element is Window(height=0), then todo widget, rest are named widgets
+        # The todo widget is injected via _get_extra_tui_widgets between spacer and status
+        named = [c for c in children if isinstance(c, str)]
+        assert named == [
             "sudo", "secret", "approval", "clarify", "spinner",
             "spacer", "status", "top-rule", "image-bar", "input-area",
             "bottom-rule", "voice-status", "completions-menu",
