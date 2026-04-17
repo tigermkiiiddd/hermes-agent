@@ -1149,6 +1149,9 @@ class AIAgent:
         # Cached system prompt -- built once per session, only rebuilt on compression
         self._cached_system_prompt: Optional[str] = None
         
+        # Active skill domains -- expanded in system prompt for detailed descriptions
+        self._active_skill_domains: set[str] = set()
+        
         # Filesystem checkpoint manager (transparent — not a tool)
         from tools.checkpoint_manager import CheckpointManager
         self._checkpoint_mgr = CheckpointManager(
@@ -3351,6 +3354,99 @@ class AIAgent:
 
 
 
+    def _set_active_domain(self, action: str, domain: str) -> None:
+        """Callback for skill_manage activate/deactivate to update active domains."""
+        if action == "activate":
+            self._active_skill_domains.add(domain)
+        elif action == "deactivate":
+            self._active_skill_domains.discard(domain)
+        logger.info("Active skill domains: %s", self._active_skill_domains)
+        # Persist to disk so gateway turns can restore state
+        self._save_active_domains()
+
+    def _save_active_domains(self) -> None:
+        """Persist active skill domains to a JSON file."""
+        try:
+            import json
+            path = self._active_domains_path()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(sorted(self._active_skill_domains)))
+        except Exception:
+            pass
+
+    def _load_active_domains(self) -> None:
+        """Restore active skill domains from persisted JSON (gateway turn recovery).
+        
+        Falls back to parsing the cached system prompt text if no JSON file exists.
+        """
+        try:
+            import json
+            path = self._active_domains_path()
+            if path.exists():
+                self._active_skill_domains = set(json.loads(path.read_text()))
+                logger.info("Restored active skill domains from file: %s", self._active_skill_domains)
+                return
+        except Exception:
+            pass
+        
+        # Fallback: infer active domains from the system prompt text
+        # Expanded categories have sub-entries like "    - skill_name: description"
+        # Collapsed categories are just "  category: name1, name2, name3"
+        if self._cached_system_prompt:
+            try:
+                import re
+                # Find category lines with expanded sub-entries following them
+                lines = self._cached_system_prompt.split("\n")
+                in_available = False
+                i = 0
+                while i < len(lines):
+                    line = lines[i]
+                    if "<available_skills>" in line:
+                        in_available = True
+                        i += 1
+                        continue
+                    if "</available_skills>" in line:
+                        break
+                    if in_available and line.startswith("  ") and not line.startswith("    "):
+                        # Category line — check if next line is indented (expanded)
+                        cat_match = re.match(r'^  ([\w/.-]+)[: ]', line)
+                        if cat_match and i + 1 < len(lines) and lines[i + 1].startswith("    - "):
+                            self._active_skill_domains.add(cat_match.group(1))
+                    i += 1
+                if self._active_skill_domains:
+                    logger.info("Inferred active skill domains from system prompt: %s", self._active_skill_domains)
+                    self._save_active_domains()
+            except Exception:
+                pass
+        self._active_skill_domains = self._active_skill_domains or set()
+
+    def _active_domains_path(self):
+        """Per-session file for persisting active domains."""
+        from pathlib import Path
+        return Path(self.logs_dir) / f".active_domains_{self.session_id}.json"
+
+    def _auto_activate_skill_domain(self, skill_name: str) -> None:
+        """Auto-activate the parent domain when a skill is viewed via skill_view."""
+        if not skill_name or ":" in skill_name:
+            return  # Skip plugin-qualified names
+        try:
+            from agent.skill_utils import get_all_skills_dirs
+            for skills_dir in get_all_skills_dirs():
+                # Check flat: skills_dir/skill_name/SKILL.md
+                flat = skills_dir / skill_name / "SKILL.md"
+                if flat.exists():
+                    return  # No category (flat layout)
+                # Check categorized: skills_dir/category/skill_name/SKILL.md
+                for cat_dir in skills_dir.iterdir():
+                    if cat_dir.is_dir() and (cat_dir / skill_name / "SKILL.md").exists():
+                        cat = cat_dir.name
+                        if cat not in self._active_skill_domains:
+                            self._set_active_domain("activate", cat)
+                            logger.info("Auto-activated domain '%s' (skill_view: %s)", cat, skill_name)
+                        return
+        except Exception:
+            pass
+
     def _build_system_prompt(self, system_message: str = None) -> str:
         """
         Assemble the full system prompt from all layers.
@@ -3466,6 +3562,7 @@ class AIAgent:
             skills_prompt = build_skills_system_prompt(
                 available_tools=self.valid_tool_names,
                 available_toolsets=avail_toolsets,
+                active_domains=self._active_skill_domains,
             )
         else:
             skills_prompt = ""
@@ -7205,6 +7302,15 @@ class AIAgent:
         if todo_snapshot:
             compressed.append({"role": "user", "content": todo_snapshot})
 
+        # Inject active skill domains state so the model knows what's expanded
+        # after compression wipes the conversation history containing activate calls
+        if self._active_skill_domains:
+            domains_str = ", ".join(sorted(self._active_skill_domains))
+            compressed.append({
+                "role": "user",
+                "content": f"[System: Active skill domains: {domains_str}. These domains are expanded in the system prompt.]",
+            })
+
         self._invalidate_system_prompt()
         new_system_prompt = self._build_system_prompt(system_message)
         self._cached_system_prompt = new_system_prompt
@@ -7220,6 +7326,9 @@ class AIAgent:
                 self.session_id = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
                 # Update session_log_file to point to the new session's JSON file
                 self.session_log_file = self.logs_dir / f"session_{self.session_id}.json"
+                # Migrate active skill domains to the new session ID
+                if self._active_skill_domains:
+                    self._save_active_domains()
                 self._session_db.create_session(
                     session_id=self.session_id,
                     source=self.platform or os.environ.get("HERMES_SESSION_SOURCE", "cli"),
@@ -7374,6 +7483,36 @@ class AIAgent:
                 max_iterations=function_args.get("max_iterations"),
                 parent_agent=self,
             )
+        elif function_name == "skill_manage":
+            from tools.skill_manager_tool import skill_manage as _skill_manage
+            result_str = _skill_manage(
+                action=function_args.get("action", ""),
+                name=function_args.get("name", ""),
+                content=function_args.get("content"),
+                category=function_args.get("category"),
+                file_path=function_args.get("file_path"),
+                file_content=function_args.get("file_content"),
+                old_string=function_args.get("old_string"),
+                new_string=function_args.get("new_string"),
+                replace_all=function_args.get("replace_all", False),
+                domain=function_args.get("domain"),
+                _active_domains_setter=self._set_active_domain,
+            )
+            # Rebuild system prompt if domain activation changed
+            if function_args.get("action") in ("activate", "deactivate") and self._cached_system_prompt is not None:
+                self._cached_system_prompt = self._build_system_prompt(self._system_message)
+            return result_str
+        elif function_name == "skill_view":
+            # Intercept to auto-activate the skill's parent domain
+            result = handle_function_call(
+                function_name, function_args, effective_task_id,
+                tool_call_id=tool_call_id,
+                session_id=self.session_id or "",
+                enabled_tools=list(self.valid_tool_names) if self.valid_tool_names else None,
+                skip_pre_tool_call_hook=True,
+            )
+            self._auto_activate_skill_domain(function_args.get("name", ""))
+            return result
         else:
             return handle_function_call(
                 function_name, function_args, effective_task_id,
@@ -7857,6 +7996,43 @@ class AIAgent:
                 # context gets refreshed on next turn.
                 if function_args.get("action") in ("set", "unset") and self._cached_system_prompt is not None:
                     self._invalidate_system_prompt()
+            elif function_name == "skill_manage":
+                from tools.skill_manager_tool import skill_manage as _skill_manage
+                function_result = _skill_manage(
+                    action=function_args.get("action", ""),
+                    name=function_args.get("name", ""),
+                    content=function_args.get("content"),
+                    category=function_args.get("category"),
+                    file_path=function_args.get("file_path"),
+                    file_content=function_args.get("file_content"),
+                    old_string=function_args.get("old_string"),
+                    new_string=function_args.get("new_string"),
+                    replace_all=function_args.get("replace_all", False),
+                    domain=function_args.get("domain"),
+                    _active_domains_setter=self._set_active_domain,
+                )
+                tool_duration = time.time() - tool_start_time
+                if self._should_emit_quiet_tool_messages():
+                    self._vprint(f"  {_get_cute_tool_message_impl('skill_manage', function_args, tool_duration, result=function_result)}")
+                # Rebuild system prompt if domain activation changed
+                if function_args.get("action") in ("activate", "deactivate") and self._cached_system_prompt is not None:
+                    self._cached_system_prompt = self._build_system_prompt(self._system_message)
+            elif function_name == "skill_view":
+                # Intercept to auto-activate the skill's parent domain
+                try:
+                    function_result = handle_function_call(
+                        function_name, function_args, effective_task_id,
+                        tool_call_id=tool_call.id,
+                        session_id=self.session_id or "",
+                        enabled_tools=list(self.valid_tool_names) if self.valid_tool_names else None,
+                        skip_pre_tool_call_hook=True,
+                    )
+                except Exception as tool_error:
+                    function_result = f"Error executing tool '{function_name}': {tool_error}"
+                tool_duration = time.time() - tool_start_time
+                if self._should_emit_quiet_tool_messages():
+                    self._vprint(f"  {_get_cute_tool_message_impl('skill_view', function_args, tool_duration, result=function_result)}")
+                self._auto_activate_skill_domain(function_args.get("name", ""))
             elif function_name == "clarify":
                 from tools.clarify_tool import clarify_tool as _clarify_tool
                 function_result = _clarify_tool(
@@ -8405,6 +8581,8 @@ class AIAgent:
                 # Continuing session — reuse the exact system prompt from
                 # the previous turn so the Anthropic cache prefix matches.
                 self._cached_system_prompt = stored_prompt
+                # Restore active skill domains from disk (gateway turns lose in-memory state)
+                self._load_active_domains()
             else:
                 # First turn of a new session — build from scratch.
                 self._cached_system_prompt = self._build_system_prompt(system_message)

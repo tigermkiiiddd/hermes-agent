@@ -1893,6 +1893,29 @@ class HermesCLI:
         filled = round((safe_percent / 100) * width)
         return f"[{('█' * filled) + ('░' * max(0, width - filled))}]"
 
+    @staticmethod
+    def _format_active_domains_label(domains: set[str], max_width: int = 24) -> str:
+        """Format active skill domains for the TUI status bar.
+
+        Shows short domain names, e.g. 'mlops/inf' instead of
+        'mlops/inference', and truncates if too many domains.
+        """
+        if not domains:
+            return ""
+        # Shorten: keep last two path segments, truncate each to 8 chars
+        short = []
+        for d in sorted(domains):
+            parts = d.split("/")
+            if len(parts) >= 2:
+                s = f"{parts[-2][0]}/{parts[-1][:8]}"
+            else:
+                s = d[:10]
+            short.append(s)
+        label = ", ".join(short)
+        if len(label) > max_width:
+            label = label[: max_width - 1] + "…"
+        return label
+
     def _get_status_bar_snapshot(self) -> Dict[str, Any]:
         # Prefer the agent's model name — it updates on fallback.
         # self.model reflects the originally configured model and never
@@ -1907,10 +1930,17 @@ class HermesCLI:
             model_short = f"{model_short[:23]}..."
 
         elapsed_seconds = max(0.0, (datetime.now() - self.session_start).total_seconds())
+
+        # Active skill domains (for TUI display)
+        active_domains: set[str] = set()
+        if agent:
+            active_domains = getattr(agent, "_active_skill_domains", None) or set()
+
         snapshot = {
             "model_name": model_name,
             "model_short": model_short,
             "duration": format_duration_compact(elapsed_seconds),
+            "active_domains": active_domains,
             "context_tokens": 0,
             "context_length": None,
             "context_percent": None,
@@ -2069,12 +2099,15 @@ class HermesCLI:
             percent = snapshot["context_percent"]
             percent_label = f"{percent}%" if percent is not None else "--"
             duration_label = snapshot["duration"]
+            domains_label = self._format_active_domains_label(snapshot.get("active_domains", set()))
 
             if width < 52:
                 text = f"⚕ {snapshot['model_short']} · {duration_label}"
                 return self._trim_status_bar_text(text, width)
             if width < 76:
                 parts = [f"⚕ {snapshot['model_short']}", percent_label]
+                if domains_label:
+                    parts.append(f"📂{domains_label}")
                 parts.append(duration_label)
                 return self._trim_status_bar_text(" · ".join(parts), width)
 
@@ -2086,6 +2119,8 @@ class HermesCLI:
                 context_label = "ctx --"
 
             parts = [f"⚕ {snapshot['model_short']}", context_label, percent_label]
+            if domains_label:
+                parts.append(f"📂{domains_label}")
             parts.append(duration_label)
             return self._trim_status_bar_text(" │ ".join(parts), width)
         except Exception:
@@ -2103,6 +2138,7 @@ class HermesCLI:
             # line and produce duplicated status bar rows over long sessions.
             width = self._get_tui_terminal_width()
             duration_label = snapshot["duration"]
+            domains_label = self._format_active_domains_label(snapshot.get("active_domains", set()))
 
             if width < 52:
                 frags = [
@@ -2121,6 +2157,13 @@ class HermesCLI:
                         ("class:status-bar-strong", snapshot["model_short"]),
                         ("class:status-bar-dim", " · "),
                         (self._status_bar_context_style(percent), percent_label),
+                    ]
+                    if domains_label:
+                        frags += [
+                            ("class:status-bar-dim", " · "),
+                            ("class:status-bar-domains", f"📂{domains_label}"),
+                        ]
+                    frags += [
                         ("class:status-bar-dim", " · "),
                         ("class:status-bar-dim", duration_label),
                         ("class:status-bar", " "),
@@ -2143,6 +2186,13 @@ class HermesCLI:
                         (bar_style, self._build_context_bar(percent)),
                         ("class:status-bar-dim", " "),
                         (bar_style, percent_label),
+                    ]
+                    if domains_label:
+                        frags += [
+                            ("class:status-bar-dim", " │ "),
+                            ("class:status-bar-domains", f"📂{domains_label}"),
+                        ]
+                    frags += [
                         ("class:status-bar-dim", " │ "),
                         ("class:status-bar-dim", duration_label),
                         ("class:status-bar", " "),
@@ -9630,6 +9680,7 @@ class HermesCLI:
             'status-bar-warn': 'bg:#1a1a2e #FFD700 bold',
             'status-bar-bad': 'bg:#1a1a2e #FF8C00 bold',
             'status-bar-critical': 'bg:#1a1a2e #FF6B6B bold',
+            'status-bar-domains': 'bg:#1a1a2e #87CEEB',
             # Bronze horizontal rules around the input area
             'input-rule': '#CD7F32',
             # Clipboard image attachment badges

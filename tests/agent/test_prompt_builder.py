@@ -263,8 +263,12 @@ class TestBuildSkillsSystemPrompt:
         )
         result = build_skills_system_prompt()
         assert "python-debug" in result
-        assert "Debug Python scripts" in result
         assert "available_skills" in result
+        # When domain is active, description should appear
+        result_expanded = build_skills_system_prompt(
+            active_domains={"coding"},
+        )
+        assert "Debug Python scripts" in result_expanded
 
     def test_deduplicates_skills(self, monkeypatch, tmp_path):
         monkeypatch.setenv("HERMES_HOME", str(tmp_path))
@@ -274,8 +278,11 @@ class TestBuildSkillsSystemPrompt:
             d.mkdir(parents=True, exist_ok=True)
             (d / "SKILL.md").write_text("---\ndescription: Search stuff\n---\n")
         result = build_skills_system_prompt()
-        # "search" should appear only once per category
-        assert result.count("- search") == 1
+        # "search" should appear only once per category (collapsed format)
+        assert result.count("search") >= 1
+        # Verify no duplicate lines
+        lines = [l for l in result.split("\n") if "search" in l and l.strip().startswith("tools")]
+        assert len(lines) == 1
 
     def test_excludes_incompatible_platform_skills(self, monkeypatch, tmp_path):
         """Skills with platforms: [macos] should not appear on Linux."""
@@ -323,7 +330,13 @@ class TestBuildSkillsSystemPrompt:
             result = build_skills_system_prompt()
 
         assert "imessage" in result
-        assert "Send iMessages" in result
+        # Description visible when domain is active
+        with patch("agent.skill_utils.sys") as mock_sys:
+            mock_sys.platform = "darwin"
+            result_expanded = build_skills_system_prompt(
+                active_domains={"apple"},
+            )
+        assert "Send iMessages" in result_expanded
 
     def test_excludes_disabled_skills(self, monkeypatch, tmp_path):
         """Skills in the user's disabled list should not appear in the system prompt."""

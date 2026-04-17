@@ -615,7 +615,7 @@ def _remove_file(name: str, file_path: str) -> Dict[str, Any]:
 
 def skill_manage(
     action: str,
-    name: str,
+    name: str = "",
     content: str = None,
     category: str = None,
     file_path: str = None,
@@ -623,13 +623,41 @@ def skill_manage(
     old_string: str = None,
     new_string: str = None,
     replace_all: bool = False,
+    domain: str = None,
+    _active_domains_setter: "callable" = None,
 ) -> str:
     """
     Manage user-created skills. Dispatches to the appropriate action handler.
 
     Returns JSON string with results.
     """
-    if action == "create":
+    if action == "activate":
+        if not domain:
+            return tool_error("domain is required for 'activate'. Provide a skill category name.", success=False)
+        # Notify run_agent.py to update active domains via callback
+        if _active_domains_setter:
+            _active_domains_setter("activate", domain)
+        # Also clear skills cache so prompt gets rebuilt
+        try:
+            from agent.prompt_builder import clear_skills_system_prompt_cache
+            clear_skills_system_prompt_cache(clear_snapshot=False)
+        except Exception:
+            pass
+        return json.dumps({"success": True, "message": f"Domain '{domain}' activated. Skills in this domain will show full descriptions."})
+
+    elif action == "deactivate":
+        if not domain:
+            return tool_error("domain is required for 'deactivate'. Provide a skill category name.", success=False)
+        if _active_domains_setter:
+            _active_domains_setter("deactivate", domain)
+        try:
+            from agent.prompt_builder import clear_skills_system_prompt_cache
+            clear_skills_system_prompt_cache(clear_snapshot=False)
+        except Exception:
+            pass
+        return json.dumps({"success": True, "message": f"Domain '{domain}' deactivated. Skills collapsed to name-only."})
+
+    elif action == "create":
         if not content:
             return tool_error("content is required for 'create'. Provide the full SKILL.md text (frontmatter + body).", success=False)
         result = _create_skill(name, content, category)
@@ -688,6 +716,9 @@ SKILL_MANAGE_SCHEMA = {
         "patch (old_string/new_string — preferred for fixes), "
         "edit (full SKILL.md rewrite — major overhauls only), "
         "delete, write_file, remove_file.\n\n"
+        "Domain activation: activate/deactivate control which skill domains are "
+        "expanded in the system prompt (showing full descriptions vs collapsed names). "
+        "Activate domains relevant to your current task.\n\n"
         "Create when: complex task succeeded (5+ calls), errors overcome, "
         "user-corrected approach worked, non-trivial workflow discovered, "
         "or user asks you to remember a procedure.\n"
@@ -704,7 +735,7 @@ SKILL_MANAGE_SCHEMA = {
         "properties": {
             "action": {
                 "type": "string",
-                "enum": ["create", "patch", "edit", "delete", "write_file", "remove_file"],
+                "enum": ["create", "patch", "edit", "delete", "write_file", "remove_file", "activate", "deactivate"],
                 "description": "The action to perform."
             },
             "name": {
@@ -762,8 +793,16 @@ SKILL_MANAGE_SCHEMA = {
                 "type": "string",
                 "description": "Content for the file. Required for 'write_file'."
             },
+            "domain": {
+                "type": "string",
+                "description": (
+                    "Skill domain/category to activate or deactivate "
+                    "(e.g., 'mlops', 'game-dev', 'github'). "
+                    "Required for 'activate' and 'deactivate' actions."
+                )
+            },
         },
-        "required": ["action", "name"],
+        "required": ["action"],
     },
 }
 
@@ -784,6 +823,8 @@ registry.register(
         file_content=args.get("file_content"),
         old_string=args.get("old_string"),
         new_string=args.get("new_string"),
-        replace_all=args.get("replace_all", False)),
+        replace_all=args.get("replace_all", False),
+        domain=args.get("domain"),
+        _active_domains_setter=kw.get("_active_domains_setter")),
     emoji="📝",
 )

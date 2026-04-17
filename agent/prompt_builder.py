@@ -583,11 +583,12 @@ def _skill_should_show(
 def build_skills_system_prompt(
     available_tools: "set[str] | None" = None,
     available_toolsets: "set[str] | None" = None,
+    active_domains: "set[str] | None" = None,
 ) -> str:
     """Build a compact skill index for the system prompt.
 
     Two-layer cache:
-      1. In-process LRU dict keyed by (skills_dir, tools, toolsets)
+      1. In-process LRU dict keyed by (skills_dir, tools, toolsets, active_domains)
       2. Disk snapshot (``.skills_prompt_snapshot.json``) validated by
          mtime/size manifest — survives process restarts
 
@@ -597,6 +598,10 @@ def build_skills_system_prompt(
     scanned alongside the local ``~/.hermes/skills/`` directory.  External dirs
     are read-only — they appear in the index but new skills are always created
     in the local dir.  Local skills take precedence when names collide.
+
+    ``active_domains`` controls fold/expand behaviour:
+      - None / empty → collapsed mode: category + skill names only (no descriptions)
+      - set of category names → those categories show full name+description lines
     """
     skills_dir = get_skills_dir()
     external_dirs = get_all_skills_dirs()[1:]  # skip local (index 0)
@@ -613,12 +618,14 @@ def build_skills_system_prompt(
         or get_session_env("HERMES_SESSION_PLATFORM")
         or ""
     )
+    _active_domains_key = tuple(sorted(active_domains)) if active_domains else ()
     cache_key = (
         str(skills_dir.resolve()),
         tuple(str(d) for d in external_dirs),
         tuple(sorted(str(t) for t in (available_tools or set()))),
         tuple(sorted(str(ts) for ts in (available_toolsets or set()))),
         _platform_hint,
+        _active_domains_key,
     )
     with _SKILLS_PROMPT_CACHE_LOCK:
         cached = _SKILLS_PROMPT_CACHE.get(cache_key)
@@ -775,36 +782,45 @@ def build_skills_system_prompt(
     if not skills_by_category:
         result = ""
     else:
+        _expanded = set(active_domains) if active_domains else set()
         index_lines = []
         for category in sorted(skills_by_category.keys()):
             cat_desc = category_descriptions.get(category, "")
-            if cat_desc:
-                index_lines.append(f"  {category}: {cat_desc}")
-            else:
-                index_lines.append(f"  {category}:")
-            # Deduplicate and sort skills within each category
+            # Collect deduplicated, sorted skill names for this category
             seen = set()
+            sorted_skills = []
             for name, desc in sorted(skills_by_category[category], key=lambda x: x[0]):
                 if name in seen:
                     continue
                 seen.add(name)
-                if desc:
-                    index_lines.append(f"    - {name}: {desc}")
+                sorted_skills.append((name, desc))
+
+            if category in _expanded:
+                # Expanded: show full name + description lines
+                if cat_desc:
+                    index_lines.append(f"  {category}: {cat_desc}")
                 else:
-                    index_lines.append(f"    - {name}")
+                    index_lines.append(f"  {category}: [expanded]")
+                for name, desc in sorted_skills:
+                    if desc:
+                        index_lines.append(f"    - {name}: {desc}")
+                    else:
+                        index_lines.append(f"    - {name}")
+            else:
+                # Collapsed: category line with skill names only (comma-separated)
+                names_str = ", ".join(n for n, _ in sorted_skills)
+                if cat_desc:
+                    index_lines.append(f"  {category}: {names_str}")
+                else:
+                    index_lines.append(f"  {category}: {names_str}")
 
         result = (
             "## Skills (mandatory)\n"
-            "Before replying, scan the skills below. If a skill matches or is even partially relevant "
-            "to your task, you MUST load it with skill_view(name) and follow its instructions. "
-            "Err on the side of loading — it is always better to have context you don't need "
-            "than to miss critical steps, pitfalls, or established workflows. "
-            "Skills contain specialized knowledge — API endpoints, tool-specific commands, "
-            "and proven workflows that outperform general-purpose approaches. Load the skill "
-            "even if you think you could handle the task with basic tools like web_search or terminal. "
-            "Skills also encode the user's preferred approach, conventions, and quality standards "
-            "for tasks like code review, planning, and testing — load them even for tasks you "
-            "already know how to do, because the skill defines how it should be done here.\n"
+            "Skills are organized by domain. Collapsed domains show skill names only. "
+            "Use skill_manage(action='activate', domain='xxx') to expand a domain and see "
+            "full descriptions. You can activate multiple domains at once. "
+            "Use skill_manage(action='deactivate', domain='xxx') to collapse when no longer needed.\n"
+            "When a skill matches your task, load it with skill_view(name) and follow its instructions.\n"
             "If a skill has issues, fix it with skill_manage(action='patch').\n"
             "After difficult/iterative tasks, offer to save as a skill. "
             "If a skill you loaded was missing steps, had wrong commands, or needed "
