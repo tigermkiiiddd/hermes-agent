@@ -7499,8 +7499,8 @@ class AIAgent:
                 _active_domains_setter=self._set_active_domain,
             )
             # Rebuild system prompt if domain activation changed
-            if function_args.get("action") in ("activate", "deactivate") and self._cached_system_prompt is not None:
-                self._cached_system_prompt = self._build_system_prompt(self._system_message)
+            if function_args.get("action") in ("activate", "deactivate"):
+                self._invalidate_system_prompt()
             return result_str
         elif function_name == "skill_view":
             # Intercept to auto-activate the skill's parent domain
@@ -8015,8 +8015,8 @@ class AIAgent:
                 if self._should_emit_quiet_tool_messages():
                     self._vprint(f"  {_get_cute_tool_message_impl('skill_manage', function_args, tool_duration, result=function_result)}")
                 # Rebuild system prompt if domain activation changed
-                if function_args.get("action") in ("activate", "deactivate") and self._cached_system_prompt is not None:
-                    self._cached_system_prompt = self._build_system_prompt(self._system_message)
+                if function_args.get("action") in ("activate", "deactivate"):
+                    self._invalidate_system_prompt()
             elif function_name == "skill_view":
                 # Intercept to auto-activate the skill's parent domain
                 try:
