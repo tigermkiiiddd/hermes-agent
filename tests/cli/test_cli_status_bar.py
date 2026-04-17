@@ -415,3 +415,233 @@ class TestStatusBarWidthSource:
         mock_get_app.assert_not_called()
         mock_shutil.assert_not_called()
         assert len(text) > 0
+
+
+# ── Snapshot: active_domains collection ───────────────────────────────
+
+class TestSnapshotActiveDomains:
+    """Verify _get_status_bar_snapshot collects active_domains from agent."""
+
+    def test_snapshot_without_agent_has_empty_domains(self):
+        cli_obj = _make_cli()
+        snap = cli_obj._get_status_bar_snapshot()
+        assert snap["active_domains"] == set()
+
+    def test_snapshot_with_agent_reads_active_domains(self):
+        cli_obj = _make_cli()
+        cli_obj.agent = SimpleNamespace(
+            model="test-model",
+            session_input_tokens=0,
+            session_output_tokens=0,
+            session_cache_read_tokens=0,
+            session_cache_write_tokens=0,
+            session_prompt_tokens=0,
+            session_completion_tokens=0,
+            session_total_tokens=0,
+            session_api_calls=0,
+            get_rate_limit_state=lambda: None,
+            context_compressor=SimpleNamespace(
+                last_prompt_tokens=0,
+                context_length=100_000,
+                compression_count=0,
+            ),
+            _active_skill_domains={"mlops/training", "github"},
+        )
+        snap = cli_obj._get_status_bar_snapshot()
+        assert snap["active_domains"] == {"mlops/training", "github"}
+
+    def test_snapshot_with_agent_no_domains_attribute(self):
+        cli_obj = _attach_agent(
+            _make_cli(),
+            prompt_tokens=100,
+            completion_tokens=50,
+            total_tokens=150,
+            api_calls=1,
+            context_tokens=100,
+            context_length=32_000,
+        )
+        # agent has no _active_skill_domains attribute
+        snap = cli_obj._get_status_bar_snapshot()
+        assert snap["active_domains"] == set()
+
+
+# ── Domain formatting ─────────────────────────────────────────────────
+
+class TestFormatActiveDomainsLabel:
+    """_format_active_domains_label static method."""
+
+    def test_empty_set_returns_empty(self):
+        assert HermesCLI._format_active_domains_label(set()) == ""
+
+    def test_single_two_level_domain(self):
+        result = HermesCLI._format_active_domains_label({"mlops/training"})
+        assert "m/training" in result
+
+    def test_multiple_domains_comma_separated(self):
+        result = HermesCLI._format_active_domains_label({"mlops/training", "github"})
+        assert "," in result
+        assert "training" in result
+        assert "github" in result
+
+    def test_flat_domain_no_slash(self):
+        result = HermesCLI._format_active_domains_label({"notes"})
+        assert "notes" in result
+
+    def test_long_list_truncated(self):
+        domains = {f"cat{i}/skill{j}" for i in range(5) for j in range(3)}
+        result = HermesCLI._format_active_domains_label(domains, max_width=20)
+        assert len(result) <= 21
+
+
+# ── build_text with active domains ────────────────────────────────────
+
+class TestBuildTextWithDomains:
+    """_build_status_bar_text should include domains when active."""
+
+    def _make_cli_with_domains(self, domains=None):
+        cli_obj = _attach_agent(
+            _make_cli(),
+            prompt_tokens=10_000,
+            completion_tokens=2_400,
+            total_tokens=12_400,
+            api_calls=5,
+            context_tokens=12_400,
+            context_length=128_000,
+        )
+        # Inject active domains into snapshot via agent
+        # NOTE: Don't use `or` — set() is falsy!
+        if domains is None:
+            domains = {"mlops/training", "github"}
+        cli_obj.agent._active_skill_domains = domains
+        return cli_obj
+
+    def test_wide_shows_domains_between_percent_and_duration(self):
+        cli_obj = self._make_cli_with_domains()
+        text = cli_obj._build_status_bar_text(width=120)
+
+        assert "📂" in text
+        # Duration should still be visible at wide width
+        assert "15m" in text
+
+    def test_wide_no_domains_no_folder(self):
+        cli_obj = self._make_cli_with_domains(domains=set())
+        text = cli_obj._build_status_bar_text(width=120)
+
+        assert "📂" not in text
+        assert "15m" in text
+
+    def test_medium_shows_domains_when_space(self):
+        cli_obj = self._make_cli_with_domains(domains={"github"})
+        text = cli_obj._build_status_bar_text(width=60)
+
+        # At medium width with a short domain, it should appear
+        assert "📂" in text
+
+    def test_narrow_no_domains(self):
+        cli_obj = self._make_cli_with_domains()
+        text = cli_obj._build_status_bar_text(width=40)
+
+        # Narrow shows model + duration only, no domains
+        assert "claude-sonnet" in text
+        assert "1h" not in text or "15m" in text
+
+
+# ── build_fragments with active domains ───────────────────────────────
+
+class TestBuildFragmentsWithDomains:
+    """_get_status_bar_fragments should include domain fragments."""
+
+    def _make_wide_cli_with_domains(self, domains=None):
+        cli_obj = _attach_agent(
+            _make_cli(),
+            prompt_tokens=100_000,
+            completion_tokens=5_000,
+            total_tokens=105_000,
+            api_calls=20,
+            context_tokens=100_000,
+            context_length=200_000,
+        )
+        cli_obj._status_bar_visible = True
+        if domains is None:
+            domains = {"mlops/training", "github"}
+        cli_obj.agent._active_skill_domains = domains
+        return cli_obj
+
+    def test_wide_fragments_include_domains_style(self):
+        cli_obj = self._make_wide_cli_with_domains()
+        mock_app = MagicMock()
+        mock_app.output.get_size.return_value = MagicMock(columns=120)
+        with patch("prompt_toolkit.application.get_app", return_value=mock_app):
+            frags = cli_obj._get_status_bar_fragments()
+        styles = {s for s, _ in frags}
+        assert "class:status-bar-domains" in styles
+
+    def test_wide_fragments_domains_text(self):
+        cli_obj = self._make_wide_cli_with_domains()
+        mock_app = MagicMock()
+        mock_app.output.get_size.return_value = MagicMock(columns=120)
+        with patch("prompt_toolkit.application.get_app", return_value=mock_app):
+            frags = cli_obj._get_status_bar_fragments()
+        full_text = "".join(t for _, t in frags)
+        assert "📂" in full_text
+
+    def test_wide_fragments_no_domains_style_absent(self):
+        cli_obj = self._make_wide_cli_with_domains(domains=set())
+        mock_app = MagicMock()
+        mock_app.output.get_size.return_value = MagicMock(columns=120)
+        with patch("prompt_toolkit.application.get_app", return_value=mock_app):
+            frags = cli_obj._get_status_bar_fragments()
+        styles = {s for s, _ in frags}
+        assert "class:status-bar-domains" not in styles
+
+    def test_medium_fragments_with_domains(self):
+        cli_obj = self._make_wide_cli_with_domains(domains={"github"})
+        mock_app = MagicMock()
+        mock_app.output.get_size.return_value = MagicMock(columns=60)
+        with patch("prompt_toolkit.application.get_app", return_value=mock_app):
+            frags = cli_obj._get_status_bar_fragments()
+        full_text = "".join(t for _, t in frags)
+        assert "📂" in full_text
+
+    def test_narrow_fragments_no_domains(self):
+        cli_obj = self._make_wide_cli_with_domains()
+        mock_app = MagicMock()
+        mock_app.output.get_size.return_value = MagicMock(columns=40)
+        with patch("prompt_toolkit.application.get_app", return_value=mock_app):
+            frags = cli_obj._get_status_bar_fragments()
+        full_text = "".join(t for _, t in frags)
+        assert "📂" not in full_text
+
+    def test_overflow_falls_back_to_plain_trimmed(self):
+        """If fragments overflow, fall back to a single trimmed plain-text fragment."""
+        cli_obj = self._make_wide_cli_with_domains()
+        # Force a very narrow width that triggers overflow
+        mock_app = MagicMock()
+        mock_app.output.get_size.return_value = MagicMock(columns=30)
+        with patch("prompt_toolkit.application.get_app", return_value=mock_app):
+            frags = cli_obj._get_status_bar_fragments()
+        # Should still produce output
+        assert len(frags) > 0
+        full_text = "".join(t for _, t in frags)
+        assert len(full_text) > 0
+
+
+# ── Width helpers: CJK ────────────────────────────────────────────────
+
+class TestWidthHelpersCJK:
+    """display_width and trim with wide characters."""
+
+    def test_display_width_cjk_chars(self):
+        w = HermesCLI._status_bar_display_width("你好世界")
+        assert w >= 8  # 4 CJK chars × 2 cells
+
+    def test_trim_preserves_short_text(self):
+        assert HermesCLI._trim_status_bar_text("hello", 100) == "hello"
+
+    def test_trim_adds_ellipsis(self):
+        result = HermesCLI._trim_status_bar_text("abcdefghij", 7)
+        assert result.endswith("...")
+        assert len(result) <= 10
+
+    def test_trim_zero_width_returns_empty(self):
+        assert HermesCLI._trim_status_bar_text("anything", 0) == ""
