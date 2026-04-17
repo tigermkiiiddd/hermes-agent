@@ -64,6 +64,7 @@ from agent.usage_pricing import (
     format_token_count_compact,
 )
 from hermes_cli.banner import _format_context_length, format_banner_version_label
+from hermes_cli.status_bar import StatusBar as _StatusBar
 
 _COMMAND_SPINNER_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
 
@@ -1864,6 +1865,7 @@ class HermesCLI:
 
         # Status bar visibility (toggled via /statusbar)
         self._status_bar_visible = True
+        self._status_bar = _StatusBar()
 
         # Background task tracking: {task_id: threading.Thread}
         self._background_tasks: Dict[str, threading.Thread] = {}
@@ -1878,43 +1880,14 @@ class HermesCLI:
             self._app.invalidate()
 
     def _status_bar_context_style(self, percent_used: Optional[int]) -> str:
-        if percent_used is None:
-            return "class:status-bar-dim"
-        if percent_used >= 95:
-            return "class:status-bar-critical"
-        if percent_used > 80:
-            return "class:status-bar-bad"
-        if percent_used >= 50:
-            return "class:status-bar-warn"
-        return "class:status-bar-good"
+        return _StatusBar.context_style(percent_used)
 
     def _build_context_bar(self, percent_used: Optional[int], width: int = 10) -> str:
-        safe_percent = max(0, min(100, percent_used or 0))
-        filled = round((safe_percent / 100) * width)
-        return f"[{('█' * filled) + ('░' * max(0, width - filled))}]"
+        return _StatusBar.build_context_bar(percent_used, width)
 
     @staticmethod
     def _format_active_domains_label(domains: set[str], max_width: int = 24) -> str:
-        """Format active skill domains for the TUI status bar.
-
-        Shows short domain names, e.g. 'mlops/inf' instead of
-        'mlops/inference', and truncates if too many domains.
-        """
-        if not domains:
-            return ""
-        # Shorten: keep last two path segments, truncate each to 8 chars
-        short = []
-        for d in sorted(domains):
-            parts = d.split("/")
-            if len(parts) >= 2:
-                s = f"{parts[-2][0]}/{parts[-1][:8]}"
-            else:
-                s = d[:10]
-            short.append(s)
-        label = ", ".join(short)
-        if len(label) > max_width:
-            label = label[: max_width - 1] + "…"
-        return label
+        return _StatusBar.format_domains(domains, max_width)
 
     def _get_status_bar_snapshot(self) -> Dict[str, Any]:
         # Prefer the agent's model name — it updates on fallback.
@@ -1981,46 +1954,11 @@ class HermesCLI:
 
     @staticmethod
     def _status_bar_display_width(text: str) -> int:
-        """Return terminal cell width for status-bar text.
-
-        len() is not enough for prompt_toolkit layout decisions because some
-        glyphs can render wider than one Python codepoint. Keeping the status
-        bar within the real display width prevents it from wrapping onto a
-        second line and leaving behind duplicate rows.
-        """
-        try:
-            from prompt_toolkit.utils import get_cwidth
-            return get_cwidth(text or "")
-        except Exception:
-            return len(text or "")
+        return _StatusBar.display_width(text)
 
     @classmethod
     def _trim_status_bar_text(cls, text: str, max_width: int) -> str:
-        """Trim status-bar text to a single terminal row."""
-        if max_width <= 0:
-            return ""
-        try:
-            from prompt_toolkit.utils import get_cwidth
-        except Exception:
-            get_cwidth = None
-
-        if cls._status_bar_display_width(text) <= max_width:
-            return text
-
-        ellipsis = "..."
-        ellipsis_width = cls._status_bar_display_width(ellipsis)
-        if max_width <= ellipsis_width:
-            return ellipsis[:max_width]
-
-        out = []
-        width = 0
-        for ch in text:
-            ch_width = get_cwidth(ch) if get_cwidth else len(ch)
-            if width + ch_width + ellipsis_width > max_width:
-                break
-            out.append(ch)
-            width += ch_width
-        return "".join(out).rstrip() + ellipsis
+        return _StatusBar.trim(text, max_width)
 
     @staticmethod
     def _get_tui_terminal_width(default: tuple[int, int] = (80, 24)) -> int:
@@ -2096,33 +2034,8 @@ class HermesCLI:
             snapshot = self._get_status_bar_snapshot()
             if width is None:
                 width = self._get_tui_terminal_width()
-            percent = snapshot["context_percent"]
-            percent_label = f"{percent}%" if percent is not None else "--"
-            duration_label = snapshot["duration"]
-            domains_label = self._format_active_domains_label(snapshot.get("active_domains", set()))
-
-            if width < 52:
-                text = f"⚕ {snapshot['model_short']} · {duration_label}"
-                return self._trim_status_bar_text(text, width)
-            if width < 76:
-                parts = [f"⚕ {snapshot['model_short']}", percent_label]
-                if domains_label:
-                    parts.append(f"📂{domains_label}")
-                parts.append(duration_label)
-                return self._trim_status_bar_text(" · ".join(parts), width)
-
-            if snapshot["context_length"]:
-                ctx_total = _format_context_length(snapshot["context_length"])
-                ctx_used = format_token_count_compact(snapshot["context_tokens"])
-                context_label = f"{ctx_used}/{ctx_total}"
-            else:
-                context_label = "ctx --"
-
-            parts = [f"⚕ {snapshot['model_short']}", context_label, percent_label]
-            if domains_label:
-                parts.append(f"📂{domains_label}")
-            parts.append(duration_label)
-            return self._trim_status_bar_text(" │ ".join(parts), width)
+            fallback = self.model if getattr(self, 'model', None) else 'Hermes'
+            return self._status_bar.build_text(snapshot, width, fallback_model=fallback)
         except Exception:
             return f"⚕ {self.model if getattr(self, 'model', None) else 'Hermes'}"
 
@@ -2131,79 +2044,9 @@ class HermesCLI:
             return []
         try:
             snapshot = self._get_status_bar_snapshot()
-            # Use prompt_toolkit's own terminal width when running inside the
-            # TUI — shutil.get_terminal_size() can return stale or fallback
-            # values (especially on SSH) that differ from what prompt_toolkit
-            # actually renders, causing the fragments to overflow to a second
-            # line and produce duplicated status bar rows over long sessions.
             width = self._get_tui_terminal_width()
-            duration_label = snapshot["duration"]
-            domains_label = self._format_active_domains_label(snapshot.get("active_domains", set()))
-
-            if width < 52:
-                frags = [
-                    ("class:status-bar", " ⚕ "),
-                    ("class:status-bar-strong", snapshot["model_short"]),
-                    ("class:status-bar-dim", " · "),
-                    ("class:status-bar-dim", duration_label),
-                    ("class:status-bar", " "),
-                ]
-            else:
-                percent = snapshot["context_percent"]
-                percent_label = f"{percent}%" if percent is not None else "--"
-                if width < 76:
-                    frags = [
-                        ("class:status-bar", " ⚕ "),
-                        ("class:status-bar-strong", snapshot["model_short"]),
-                        ("class:status-bar-dim", " · "),
-                        (self._status_bar_context_style(percent), percent_label),
-                    ]
-                    if domains_label:
-                        frags += [
-                            ("class:status-bar-dim", " · "),
-                            ("class:status-bar-domains", f"📂{domains_label}"),
-                        ]
-                    frags += [
-                        ("class:status-bar-dim", " · "),
-                        ("class:status-bar-dim", duration_label),
-                        ("class:status-bar", " "),
-                    ]
-                else:
-                    if snapshot["context_length"]:
-                        ctx_total = _format_context_length(snapshot["context_length"])
-                        ctx_used = format_token_count_compact(snapshot["context_tokens"])
-                        context_label = f"{ctx_used}/{ctx_total}"
-                    else:
-                        context_label = "ctx --"
-
-                    bar_style = self._status_bar_context_style(percent)
-                    frags = [
-                        ("class:status-bar", " ⚕ "),
-                        ("class:status-bar-strong", snapshot["model_short"]),
-                        ("class:status-bar-dim", " │ "),
-                        ("class:status-bar-dim", context_label),
-                        ("class:status-bar-dim", " │ "),
-                        (bar_style, self._build_context_bar(percent)),
-                        ("class:status-bar-dim", " "),
-                        (bar_style, percent_label),
-                    ]
-                    if domains_label:
-                        frags += [
-                            ("class:status-bar-dim", " │ "),
-                            ("class:status-bar-domains", f"📂{domains_label}"),
-                        ]
-                    frags += [
-                        ("class:status-bar-dim", " │ "),
-                        ("class:status-bar-dim", duration_label),
-                        ("class:status-bar", " "),
-                    ]
-
-            total_width = sum(self._status_bar_display_width(text) for _, text in frags)
-            if total_width > width:
-                plain_text = "".join(text for _, text in frags)
-                trimmed = self._trim_status_bar_text(plain_text, width)
-                return [("class:status-bar", trimmed)]
-            return frags
+            fallback = self._build_status_bar_text(width=width)
+            return self._status_bar.build_fragments(snapshot, width, fallback_text=fallback)
         except Exception:
             return [("class:status-bar", f" {self._build_status_bar_text()} ")]
 
@@ -9673,14 +9516,7 @@ class HermesCLI:
             'prompt': '#FFF8DC',
             'prompt-working': '#888888 italic',
             'hint': '#555555 italic',
-            'status-bar': 'bg:#1a1a2e #C0C0C0',
-            'status-bar-strong': 'bg:#1a1a2e #FFD700 bold',
-            'status-bar-dim': 'bg:#1a1a2e #8B8682',
-            'status-bar-good': 'bg:#1a1a2e #8FBC8F bold',
-            'status-bar-warn': 'bg:#1a1a2e #FFD700 bold',
-            'status-bar-bad': 'bg:#1a1a2e #FF8C00 bold',
-            'status-bar-critical': 'bg:#1a1a2e #FF6B6B bold',
-            'status-bar-domains': 'bg:#1a1a2e #87CEEB',
+            **_StatusBar.STYLES,
             # Bronze horizontal rules around the input area
             'input-rule': '#CD7F32',
             # Clipboard image attachment badges

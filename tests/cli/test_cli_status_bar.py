@@ -11,6 +11,9 @@ def _make_cli(model: str = "anthropic/claude-sonnet-4-20250514"):
     cli_obj.session_start = datetime.now() - timedelta(minutes=14, seconds=32)
     cli_obj.conversation_history = [{"role": "user", "content": "hi"}]
     cli_obj.agent = None
+    # __new__ skips __init__, so manually set the StatusBar instance
+    from hermes_cli.status_bar import StatusBar
+    cli_obj._status_bar = StatusBar()
     return cli_obj
 
 
