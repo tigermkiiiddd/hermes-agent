@@ -1051,7 +1051,20 @@ DELEGATE_TASK_SCHEMA = {
         "- Subagents CANNOT call: delegate_task, clarify, memory, send_message, "
         "execute_code.\n"
         "- Each subagent gets its own terminal session (separate working directory and state).\n"
-        "- Results are always returned as an array, one entry per task."
+        "- Results are always returned as an array, one entry per task.\n\n"
+        "SKILLS (CRITICAL):\n"
+        "- Subagents start with ZERO knowledge of your project conventions, tool usage patterns, "
+        "or domain expertise. They are blank slates.\n"
+        "- You MUST inject relevant skills via the 'skills' parameter. Without skills, "
+        "the subagent will produce low-quality output because it lacks context about "
+        "how to use tools correctly, project structure, coding conventions, etc.\n"
+        "- Before calling delegate_task, ALWAYS ask yourself: 'Which of my loaded skills "
+        "are relevant to this task?' Then pass them in the 'skills' array.\n"
+        "- Example: if the task involves hermes-agent code, pass skills=['hermes-agent']. "
+        "If it involves debugging, pass skills=['systematic-debugging']. "
+        "For game design work, pass skills=['creative-director', 'senior-game-designer'].\n"
+        "- If you have active skills loaded in your current session, they are listed in your "
+        "system prompt under 'available_skills'. Reference that list to decide which to inject."
     ),
     "parameters": {
         "type": "object",
@@ -1150,10 +1163,14 @@ DELEGATE_TASK_SCHEMA = {
                 "type": "array",
                 "items": {"type": "string"},
                 "description": (
-                    "Skill names to inject into the subagent's system prompt. "
-                    "Supports qualified names like 'plugin:skill' and bare names "
-                    "like 'debugging'. The full skill content is loaded and "
-                    "included as context for the subagent."
+                    "CRITICAL: Skills to inject into the subagent's system prompt. "
+                    "Subagents are blank slates — they have none of your domain knowledge, "
+                    "project conventions, or tool usage expertise. "
+                    "Without relevant skills, subagent output quality will be poor. "
+                    "ALWAYS pass skills that cover: (1) domain knowledge needed for the task, "
+                    "(2) tool usage patterns (e.g. 'hermes-agent' for hermes code, "
+                    "'systematic-debugging' for debugging, 'writing-plans' for planning). "
+                    "Check your 'available_skills' list in the system prompt to find matching skills."
                 ),
             },
         },
