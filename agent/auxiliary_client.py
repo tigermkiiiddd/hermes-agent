@@ -2653,6 +2653,7 @@ def call_llm_failover(
     extra_body: dict = None,
     main_runtime: Optional[Dict[str, Any]] = None,
     failover_delay: float = 2.0,
+    status_fn: Optional[callable] = None,
 ) -> Any:
     """Call LLMs in failover-chain order until one succeeds.
 
@@ -2698,6 +2699,11 @@ def call_llm_failover(
                 "Failover %s: attempt %d/%d — provider=%s model=%s",
                 task or "call", idx + 1, len(chain), prov, mdl or "default",
             )
+            if status_fn:
+                try:
+                    status_fn(prov, mdl, idx + 1, len(chain))
+                except Exception:
+                    pass
             return call_llm(
                 task=task,
                 provider=prov,

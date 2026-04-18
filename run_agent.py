@@ -7550,6 +7550,7 @@ class AIAgent:
             focus_topic,
         )
         # Pre-compression memory flush: let the model save memories before they're lost
+        self._emit_status("  ├ flushing memories…")
         self.flush_memories(messages, min_turns=0)
 
         # Notify external memory provider before compression discards context
@@ -7559,7 +7560,16 @@ class AIAgent:
             except Exception:
                 pass
 
-        compressed = self.context_compressor.compress(messages, current_tokens=approx_tokens, focus_topic=focus_topic)
+        # Compression status callback — shows which model is being used
+        def _compression_status(provider, model, attempt, total):
+            _m = model or "(default)"
+            if total > 1:
+                self._emit_status(f"  ├ summarizing [{attempt}/{total}] → {provider}/{_m}")
+            else:
+                self._emit_status(f"  ├ summarizing → {provider}/{_m}")
+
+        self._emit_status("  ├ summarizing context…")
+        compressed = self.context_compressor.compress(messages, current_tokens=approx_tokens, focus_topic=focus_topic, status_fn=_compression_status)
 
         todo_snapshot = self._todo_store.format_for_injection()
         if todo_snapshot:
@@ -11319,7 +11329,8 @@ class AIAgent:
                         _real_tokens = estimate_messages_tokens_rough(messages)
 
                     if self.compression_enabled and _compressor.should_compress(_real_tokens):
-                        self._safe_print("  ⟳ compacting context…")
+                        _comp_tokens = f"{_real_tokens:,}" if _real_tokens else "???"
+                        self._emit_status(f"⟳ compressing ~{_comp_tokens} tokens…")
                         messages, active_system_prompt = self._compress_context(
                             messages, system_message,
                             approx_tokens=self.context_compressor.last_prompt_tokens,

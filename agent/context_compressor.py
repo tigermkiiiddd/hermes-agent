@@ -542,7 +542,7 @@ class ContextCompressor(ContextEngine):
 
         return "\n\n".join(parts)
 
-    def _generate_summary(self, turns_to_summarize: List[Dict[str, Any]], focus_topic: str = None) -> Optional[str]:
+    def _generate_summary(self, turns_to_summarize: List[Dict[str, Any]], focus_topic: str = None, status_fn=None) -> Optional[str]:
         """Generate a structured summary of conversation turns.
 
         Uses a structured template (Goal, Progress, Decisions, Resolved/Pending
@@ -700,8 +700,15 @@ The user has requested that this compaction PRIORITISE preserving all informatio
             # through the failover chain instead of the normal call_llm path.
             _resolved_prov, _, _, _, _ = _resolve_task_provider_model("compression")
             if _resolved_prov == "failover":
+                call_kwargs["status_fn"] = status_fn
                 response = call_llm_failover(**call_kwargs)
             else:
+                # Show which provider/model is being used for non-failover path
+                if status_fn:
+                    try:
+                        status_fn(_resolved_prov or "auto", self.summary_model or self.model, 1, 1)
+                    except Exception:
+                        pass
                 response = call_llm(**call_kwargs)
             content = response.choices[0].message.content
             # Handle cases where content is not a string (e.g., dict from llama.cpp)
@@ -1003,7 +1010,7 @@ The user has requested that this compaction PRIORITISE preserving all informatio
     # Main compression entry point
     # ------------------------------------------------------------------
 
-    def compress(self, messages: List[Dict[str, Any]], current_tokens: int = None, focus_topic: str = None) -> List[Dict[str, Any]]:
+    def compress(self, messages: List[Dict[str, Any]], current_tokens: int = None, focus_topic: str = None, status_fn=None) -> List[Dict[str, Any]]:
         """Compress conversation messages by summarizing middle turns.
 
         Algorithm:
@@ -1078,7 +1085,7 @@ The user has requested that this compaction PRIORITISE preserving all informatio
             )
 
         # Phase 3: Generate structured summary
-        summary = self._generate_summary(turns_to_summarize, focus_topic=focus_topic)
+        summary = self._generate_summary(turns_to_summarize, focus_topic=focus_topic, status_fn=status_fn)
 
         # Phase 4: Assemble compressed message list
         compressed = []
