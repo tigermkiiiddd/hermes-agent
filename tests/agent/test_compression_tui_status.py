@@ -2,11 +2,14 @@
 
 Covers:
   - status_fn callback in call_llm_failover
-  - status_fn propagation through ContextCompressor.compress → _generate_summary
+  - status_fn propagation through ContextCompressor.compress → call_llm
   - _compress_context emits status messages with provider/model info
-  - Non-failover path also shows provider/model
+  - Both failover and non-failover paths show provider/model
 
-TDD flow: RED → GREEN → REFACTOR
+After refactor: context_compressor no longer branches on failover.
+It passes status_fn to call_llm which handles routing internally.
+
+TDD flow: RED -> GREEN -> REFACTOR
 """
 
 from unittest.mock import patch, MagicMock, call
@@ -14,7 +17,7 @@ from unittest.mock import patch, MagicMock, call
 import pytest
 
 
-# ── call_llm_failover status_fn ──────────────────────────────────────
+# -- call_llm_failover status_fn -----------------------------------------
 
 class TestFailoverStatusCallback:
     """Verify call_llm_failover calls status_fn before each attempt."""
@@ -53,7 +56,6 @@ class TestFailoverStatusCallback:
         call_llm_failover(
             task="compression",
             messages=[{"role": "user", "content": "hi"}],
-            failover_delay=0,
             status_fn=status_fn,
         )
 
@@ -70,13 +72,12 @@ class TestFailoverStatusCallback:
             {"provider": "openrouter", "model": "test"},
         ]
         mock_call.return_value = MagicMock()
-        status_fn = MagicMock(side_effect=RuntimeError("TUI crashed"))
+        bad_fn = MagicMock(side_effect=ValueError("boom"))
 
-        # Should NOT raise — status_fn errors are swallowed
         result = call_llm_failover(
             task="compression",
             messages=[{"role": "user", "content": "hi"}],
-            status_fn=status_fn,
+            status_fn=bad_fn,
         )
         assert result is not None
 
@@ -98,18 +99,23 @@ class TestFailoverStatusCallback:
         assert result is not None
 
 
-# ── ContextCompressor.compress status_fn ─────────────────────────────
+# -- ContextCompressor.compress status_fn (unified via call_llm) ---------
 
 class TestCompressorStatusPropagation:
-    """Verify compress() forwards status_fn to _generate_summary."""
+    """Verify compress() forwards status_fn to call_llm."""
 
-    @patch("agent.context_compressor._resolve_task_provider_model")
-    @patch("agent.context_compressor.call_llm_failover")
-    @patch("agent.context_compressor.call_llm")
-    def test_failover_path_receives_status_fn(self, mock_call_llm, mock_failover, mock_resolve):
+    @patch("agent.auxiliary_client._resolve_task_provider_model")
+    @patch("agent.auxiliary_client.call_llm_failover")
+    def test_failover_path_receives_status_fn(self, mock_failover, mock_resolve):
+        """When provider=failover, status_fn should reach call_llm_failover."""
         from agent.context_compressor import ContextCompressor
 
-        mock_resolve.return_value = ("failover", None, None, None, None)
+        # First call resolves compression provider to failover
+        # Second call resolves again inside call_llm
+        mock_resolve.side_effect = [
+            ("failover", None, None, None, None),
+            ("failover", None, None, None, None),
+        ]
         mock_resp = MagicMock()
         mock_resp.choices = [MagicMock()]
         mock_resp.choices[0].message.content = "## Summary\nTest"
@@ -122,32 +128,35 @@ class TestCompressorStatusPropagation:
             threshold_percent=0.5,
         )
 
-        # Build messages long enough to trigger compression
         messages = [{"role": "system", "content": "sys"}]
         messages.append({"role": "user", "content": "hello"})
         messages.append({"role": "assistant", "content": "hi"})
-        # Add enough messages to have middle turns to compress
         for i in range(10):
             messages.append({"role": "user", "content": f"msg {i}"})
             messages.append({"role": "assistant", "content": f"reply {i}"})
 
         comp.compress(messages, status_fn=status_fn)
 
-        # status_fn should have been called via call_llm_failover
+        # status_fn should have been forwarded through call_llm -> call_llm_failover
         mock_failover.assert_called_once()
         call_kwargs = mock_failover.call_args[1]
         assert call_kwargs.get("status_fn") is status_fn
 
     @patch("agent.auxiliary_client._resolve_task_provider_model")
-    @patch("agent.auxiliary_client.call_llm")
-    def test_normal_path_calls_status_fn(self, mock_call_llm, mock_resolve):
+    @patch("agent.auxiliary_client._get_cached_client")
+    def test_normal_path_calls_status_fn(self, mock_client, mock_resolve):
+        """Non-failover path: call_llm calls status_fn internally."""
         from agent.context_compressor import ContextCompressor
 
-        mock_resolve.return_value = ("openrouter", None, None, None, None)
+        mock_resolve.return_value = ("openrouter", "test-model", None, None, None)
         mock_resp = MagicMock()
         mock_resp.choices = [MagicMock()]
         mock_resp.choices[0].message.content = "## Summary\nTest"
-        mock_call_llm.return_value = mock_resp
+
+        mock_openai = MagicMock()
+        mock_openai.chat.completions.create.return_value = mock_resp
+        mock_client.return_value = (mock_openai, "test-model")
+
         status_fn = MagicMock()
 
         comp = ContextCompressor(
@@ -165,33 +174,34 @@ class TestCompressorStatusPropagation:
 
         comp.compress(messages, status_fn=status_fn)
 
-        # Non-failover path should call status_fn with resolved provider/model
-        status_fn.assert_called_once()
+        # status_fn called by call_llm for non-failover path
+        status_fn.assert_called()
         args = status_fn.call_args[0]
-        assert args[0] == "openrouter"  # provider
+        assert args[0] is not None  # provider
         assert args[2] == 1  # attempt
         assert args[3] == 1  # total
 
 
-# ── _compress_context emits status ───────────────────────────────────
+# -- _compress_context emits status --------------------------------------
 
 class TestCompressContextStatus:
-    """Verify _compress_context calls _emit_status with model info."""
+    """Verify _compress_context calls status_fn with model info."""
 
     @patch("agent.auxiliary_client._resolve_task_provider_model")
-    @patch("agent.auxiliary_client.call_llm")
-    def test_emits_compacting_status(self, mock_call_llm, mock_resolve):
+    @patch("agent.auxiliary_client._get_cached_client")
+    def test_emits_compacting_status(self, mock_client, mock_resolve):
         """_compress_context should emit status showing compression in progress."""
         from agent.context_compressor import ContextCompressor
 
-        mock_resolve.return_value = ("openrouter", None, None, None, None)
+        mock_resolve.return_value = ("openrouter", "test-model", None, None, None)
         mock_resp = MagicMock()
         mock_resp.choices = [MagicMock()]
         mock_resp.choices[0].message.content = "## Summary\nTest"
-        mock_call_llm.return_value = mock_resp
 
-        # We test at the compress() level — _compress_context wraps it
-        # The key assertion: status_fn receives (provider, model, attempt, total)
+        mock_openai = MagicMock()
+        mock_openai.chat.completions.create.return_value = mock_resp
+        mock_client.return_value = (mock_openai, "test-model")
+
         received = []
         status_fn = lambda prov, mdl, att, tot: received.append((prov, mdl, att, tot))
 

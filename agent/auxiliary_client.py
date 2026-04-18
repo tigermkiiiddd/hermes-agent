@@ -1594,6 +1594,32 @@ def resolve_provider_client(
 
     pconfig = PROVIDER_REGISTRY.get(provider)
     if pconfig is None:
+        # "failover" is a virtual provider that expands into the failover chain.
+        # Try each entry until one resolves to a real client.
+        if provider == "failover":
+            chain = _read_failover_chain()
+            if not chain:
+                logger.warning("resolve_provider_client: failover provider with empty chain")
+                return None, None
+            for entry in chain:
+                entry_prov = entry.get("provider", "")
+                entry_mdl = entry.get("model") or model
+                entry_base = entry.get("base_url")
+                entry_key = entry.get("api_key")
+                result = resolve_provider_client(
+                    entry_prov,
+                    model=entry_mdl,
+                    raw_codex=raw_codex,
+                    async_mode=async_mode,
+                    explicit_base_url=entry_base,
+                    explicit_api_key=entry_key,
+                    api_mode=api_mode,
+                )
+                if result[0] is not None:
+                    return result
+            logger.warning("resolve_provider_client: all failover chain entries failed")
+            return None, None
+
         logger.warning("resolve_provider_client: unknown provider %r", provider)
         return None, None
 
@@ -2424,6 +2450,7 @@ def call_llm(
     tools: list = None,
     timeout: float = None,
     extra_body: dict = None,
+    status_fn: Optional[callable] = None,
 ) -> Any:
     """Centralized synchronous LLM call.
 
@@ -2465,6 +2492,7 @@ def call_llm(
             timeout=timeout,
             extra_body=extra_body,
             main_runtime=main_runtime,
+            status_fn=status_fn,
         )
 
     if task == "vision":
@@ -2526,6 +2554,13 @@ def call_llm(
                 f"Run: hermes setup")
 
     effective_timeout = timeout if timeout is not None else _get_task_timeout(task)
+
+    # Notify status callback for non-failover path (single attempt).
+    if status_fn:
+        try:
+            status_fn(resolved_provider or "auto", final_model or resolved_model, 1, 1)
+        except Exception:
+            pass
 
     # Log what we're about to do — makes auxiliary operations visible
     _base_info = str(getattr(client, "base_url", resolved_base_url) or "")
@@ -2819,6 +2854,7 @@ async def async_call_llm(
     tools: list = None,
     timeout: float = None,
     extra_body: dict = None,
+    status_fn: Optional[callable] = None,
 ) -> Any:
     """Centralized asynchronous LLM call.
 
@@ -2838,6 +2874,7 @@ async def async_call_llm(
             tools=tools,
             timeout=timeout,
             extra_body=extra_body,
+            status_fn=status_fn,
         )
 
     if task == "vision":
