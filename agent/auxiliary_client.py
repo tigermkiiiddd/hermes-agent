@@ -2754,6 +2754,9 @@ def call_llm_failover(
                     status_fn(prov, mdl, idx + 1, len(chain))
                 except Exception:
                     pass
+            # Merge entry-level extra_body with caller-provided extra_body
+            _entry_extra = entry.get("extra_body") or {}
+            _merged_extra = {**(extra_body or {}), **_entry_extra}
             return call_llm(
                 task=task,
                 provider=prov,
@@ -2765,7 +2768,7 @@ def call_llm_failover(
                 max_tokens=max_tokens,
                 tools=tools,
                 timeout=timeout,
-                extra_body=extra_body,
+                extra_body=_merged_extra or None,
                 main_runtime=main_runtime,
             )
         except Exception as exc:
