@@ -2452,6 +2452,21 @@ def call_llm(
     resolved_provider, resolved_model, resolved_base_url, resolved_api_key, resolved_api_mode = _resolve_task_provider_model(
         task, provider, model, base_url, api_key)
 
+    # When the resolved provider is 'failover', transparently route through
+    # the failover chain instead of trying to create a client for the literal
+    # "failover" provider (which resolve_provider_client doesn't understand).
+    if resolved_provider == "failover":
+        return call_llm_failover(
+            task=task,
+            messages=messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            tools=tools,
+            timeout=timeout,
+            extra_body=extra_body,
+            main_runtime=main_runtime,
+        )
+
     if task == "vision":
         effective_provider, client, final_model = resolve_vision_provider_client(
             provider=resolved_provider if resolved_provider != "auto" else provider,
@@ -2811,6 +2826,19 @@ async def async_call_llm(
     """
     resolved_provider, resolved_model, resolved_base_url, resolved_api_key, resolved_api_mode = _resolve_task_provider_model(
         task, provider, model, base_url, api_key)
+
+    # When the resolved provider is 'failover', transparently route through
+    # the failover chain (synchronous — call_llm_failover is sync).
+    if resolved_provider == "failover":
+        return call_llm_failover(
+            task=task,
+            messages=messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            tools=tools,
+            timeout=timeout,
+            extra_body=extra_body,
+        )
 
     if task == "vision":
         effective_provider, client, final_model = resolve_vision_provider_client(
