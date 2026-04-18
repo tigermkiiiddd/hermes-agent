@@ -220,6 +220,69 @@ _SCHEMA_OVERRIDES: Dict[str, Dict[str, Any]] = {
         "description": "Reasoning effort for delegated subagents",
         "options": ["", "low", "medium", "high"],
     },
+
+    # ---- Auxiliary task providers ----
+    "auxiliary.vision.provider": {
+        "type": "select",
+        "description": "Provider for vision/image analysis",
+        "options": ["auto", "openrouter", "nous", "codex", "anthropic", "openai", "google", "deepseek", "custom", "failover"],
+        "category": "auxiliary",
+    },
+    "auxiliary.web_extract.provider": {
+        "type": "select",
+        "description": "Provider for web content extraction",
+        "options": ["auto", "openrouter", "nous", "codex", "anthropic", "openai", "google", "deepseek", "custom", "failover"],
+        "category": "auxiliary",
+    },
+    "auxiliary.compression.provider": {
+        "type": "select",
+        "description": "Provider for context compression",
+        "options": ["auto", "openrouter", "nous", "codex", "anthropic", "openai", "google", "deepseek", "custom", "failover"],
+        "category": "auxiliary",
+    },
+    "auxiliary.session_search.provider": {
+        "type": "select",
+        "description": "Provider for session search queries",
+        "options": ["auto", "openrouter", "nous", "codex", "anthropic", "openai", "google", "deepseek", "custom", "failover"],
+        "category": "auxiliary",
+    },
+    "auxiliary.skills_hub.provider": {
+        "type": "select",
+        "description": "Provider for skills hub queries",
+        "options": ["auto", "openrouter", "nous", "codex", "anthropic", "openai", "google", "deepseek", "custom", "failover"],
+        "category": "auxiliary",
+    },
+    "auxiliary.approval.provider": {
+        "type": "select",
+        "description": "Provider for command approval decisions",
+        "options": ["auto", "openrouter", "nous", "codex", "anthropic", "openai", "google", "deepseek", "custom", "failover"],
+        "category": "auxiliary",
+    },
+    "auxiliary.mcp.provider": {
+        "type": "select",
+        "description": "Provider for MCP tool calls",
+        "options": ["auto", "openrouter", "nous", "codex", "anthropic", "openai", "google", "deepseek", "custom", "failover"],
+        "category": "auxiliary",
+    },
+    "auxiliary.flush_memories.provider": {
+        "type": "select",
+        "description": "Provider for memory flush processing",
+        "options": ["auto", "openrouter", "nous", "codex", "anthropic", "openai", "google", "deepseek", "custom", "failover"],
+        "category": "auxiliary",
+    },
+    "auxiliary.title_generation.provider": {
+        "type": "select",
+        "description": "Provider for session title generation",
+        "options": ["auto", "openrouter", "nous", "codex", "anthropic", "openai", "google", "deepseek", "custom", "failover"],
+        "category": "auxiliary",
+    },
+
+    # ---- Failover chain ----
+    "auxiliary.failover_chain": {
+        "type": "provider_chain",
+        "description": "Failover provider chain for auxiliary tasks (compression, flush_memories, etc.). Tried in order on failure.",
+        "category": "auxiliary",
+    },
 }
 
 # Categories with fewer fields get merged into "general" to avoid tab sprawl.

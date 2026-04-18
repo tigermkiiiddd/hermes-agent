@@ -114,6 +114,64 @@ export function AutoField({
     );
   }
 
+  if (schema.type === "provider_chain") {
+    const chain = (Array.isArray(value) ? value : []) as Array<Record<string, string>>;
+    const updateChain = (idx: number, field: "provider" | "model", val: string) => {
+      const next = chain.map((entry, i) =>
+        i === idx ? { ...entry, [field]: val } : entry,
+      );
+      onChange(next);
+    };
+    const removeEntry = (idx: number) => {
+      onChange(chain.filter((_, i) => i !== idx));
+    };
+    const addEntry = () => {
+      onChange([...chain, { provider: "", model: "" }]);
+    };
+    return (
+      <div className="grid gap-2">
+        <div className="flex items-center justify-between">
+          <Label className="text-sm">{label}</Label>
+          <button
+            type="button"
+            onClick={addEntry}
+            className="inline-flex items-center gap-1 rounded px-2 py-0.5 text-xs bg-primary/10 text-primary hover:bg-primary/20"
+          >
+            + Add
+          </button>
+        </div>
+        <FieldHint schema={schema} schemaKey={schemaKey} />
+        {chain.length === 0 && (
+          <span className="text-xs text-muted-foreground/60 italic">No entries — click + Add to define a failover chain.</span>
+        )}
+        {chain.map((entry, idx) => (
+          <div key={idx} className="flex items-center gap-2">
+            <input
+              className="flex-1 min-w-0 border border-input bg-transparent px-2 py-1 text-xs shadow-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+              placeholder="provider (e.g. openrouter)"
+              value={entry.provider ?? ""}
+              onChange={(e) => updateChain(idx, "provider", e.target.value)}
+            />
+            <input
+              className="flex-1 min-w-0 border border-input bg-transparent px-2 py-1 text-xs shadow-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+              placeholder="model (e.g. google/gemini-3-flash)"
+              value={entry.model ?? ""}
+              onChange={(e) => updateChain(idx, "model", e.target.value)}
+            />
+            <button
+              type="button"
+              onClick={() => removeEntry(idx)}
+              className="shrink-0 rounded px-1.5 py-1 text-xs text-red-500 hover:bg-red-500/10"
+              title="Remove"
+            >
+              ✕
+            </button>
+          </div>
+        ))}
+      </div>
+    );
+  }
+
   if (typeof value === "object" && value !== null && !Array.isArray(value)) {
     const obj = value as Record<string, unknown>;
     return (

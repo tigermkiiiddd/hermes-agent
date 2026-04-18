@@ -548,6 +548,7 @@ DEFAULT_CONFIG = {
             "api_key": "",
             "timeout": 30,
         },
+        "failover_chain": [],  # List of {provider, model} dicts for failover routing
     },
     
     "display": {

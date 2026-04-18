@@ -24,7 +24,7 @@ import re
 import time
 from typing import Any, Dict, List, Optional
 
-from agent.auxiliary_client import call_llm
+from agent.auxiliary_client import call_llm, call_llm_failover, _resolve_task_provider_model
 from agent.context_engine import ContextEngine
 from agent.model_metadata import (
     MINIMUM_CONTEXT_LENGTH,
@@ -695,7 +695,14 @@ The user has requested that this compaction PRIORITISE preserving all informatio
             }
             if self.summary_model:
                 call_kwargs["model"] = self.summary_model
-            response = call_llm(**call_kwargs)
+
+            # When the task's provider is configured as 'failover', route
+            # through the failover chain instead of the normal call_llm path.
+            _resolved_prov, _, _, _, _ = _resolve_task_provider_model("compression")
+            if _resolved_prov == "failover":
+                response = call_llm_failover(**call_kwargs)
+            else:
+                response = call_llm(**call_kwargs)
             content = response.choices[0].message.content
             # Handle cases where content is not a string (e.g., dict from llama.cpp)
             if not isinstance(content, str):

@@ -7423,7 +7423,9 @@ class AIAgent:
             # it's cheaper and avoids Codex Responses API incompatibility.
             from agent.auxiliary_client import (
                 call_llm as _call_llm,
+                call_llm_failover as _call_llm_failover,
                 _fixed_temperature_for_model,
+                _resolve_task_provider_model as _rtpm,
             )
             _aux_available = True
             # Use the fixed-temperature override (e.g. kimi-for-coding → 0.6) if
@@ -7431,8 +7433,13 @@ class AIAgent:
             _flush_temperature = _fixed_temperature_for_model(self.model)
             if _flush_temperature is None:
                 _flush_temperature = 0.3
+
+            # Determine whether flush_memories provider is configured as 'failover'.
+            _flush_prov, _, _, _, _ = _rtpm("flush_memories")
+            _use_failover = _flush_prov == "failover"
+
             try:
-                response = _call_llm(
+                _flush_call_kwargs = dict(
                     task="flush_memories",
                     messages=api_messages,
                     tools=[memory_tool_def],
@@ -7440,6 +7447,10 @@ class AIAgent:
                     max_tokens=5120,
                     # timeout resolved from auxiliary.flush_memories.timeout config
                 )
+                if _use_failover:
+                    response = _call_llm_failover(**_flush_call_kwargs)
+                else:
+                    response = _call_llm(**_flush_call_kwargs)
             except RuntimeError:
                 _aux_available = False
                 response = None

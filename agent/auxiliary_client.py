@@ -85,6 +85,9 @@ def _normalize_aux_provider(provider: Optional[str]) -> str:
         normalized = suffix
     if normalized == "codex":
         return "openai-codex"
+    if normalized == "failover":
+        # Transparent pass-through — resolved at call time by call_llm_failover.
+        return "failover"
     if normalized == "main":
         # Resolve to the user's actual main provider so named custom providers
         # and non-aggregator providers (DeepSeek, Alibaba, etc.) work correctly.
@@ -2578,6 +2581,152 @@ def call_llm(
                 return _validate_llm_response(
                     fb_client.chat.completions.create(**fb_kwargs), task)
         raise
+
+
+# ---------------------------------------------------------------------------
+# Failover chain support
+# ---------------------------------------------------------------------------
+
+def _read_failover_chain() -> List[Dict[str, str]]:
+    """Read the auxiliary.failover_chain list from config.yaml.
+
+    Each entry is a dict with ``provider`` and ``model`` keys, e.g.::
+
+        auxiliary:
+          failover_chain:
+            - provider: openrouter
+              model: nvidia/nemotron-3-super-120b-a12b:free
+            - provider: openrouter
+              model: google/gemini-3-flash-preview
+            - provider: zai
+              model: glm-5.1
+
+    Returns an empty list when the key is missing or malformed.
+    """
+    try:
+        from hermes_cli.config import load_config
+        config = load_config()
+    except ImportError:
+        return []
+
+    if not isinstance(config, dict):
+        return []
+
+    aux = config.get("auxiliary", {})
+    if not isinstance(aux, dict):
+        return []
+
+    chain = aux.get("failover_chain")
+    if not isinstance(chain, list):
+        return []
+
+    result: List[Dict[str, str]] = []
+    for entry in chain:
+        if not isinstance(entry, dict):
+            continue
+        prov = str(entry.get("provider", "")).strip()
+        mdl = str(entry.get("model", "")).strip()
+        base = str(entry.get("base_url", "")).strip()
+        key = str(entry.get("api_key", "")).strip()
+        # Resolve env var references like "GLM_API_KEY" → actual value
+        if key and key.isupper() and "_" in key:
+            key = os.environ.get(key, key)
+        if prov:
+            item: Dict[str, str] = {"provider": prov, "model": mdl}
+            if base:
+                item["base_url"] = base
+            if key:
+                item["api_key"] = key
+            result.append(item)
+
+    return result
+
+
+def call_llm_failover(
+    task: str = None,
+    *,
+    messages: list,
+    temperature: float = None,
+    max_tokens: int = None,
+    tools: list = None,
+    timeout: float = None,
+    extra_body: dict = None,
+    main_runtime: Optional[Dict[str, Any]] = None,
+    failover_delay: float = 2.0,
+) -> Any:
+    """Call LLMs in failover-chain order until one succeeds.
+
+    Iterates over the ``failover_chain`` list from config.yaml.  For each
+    entry the ``provider`` and ``model`` are passed explicitly to
+    :func:`call_llm`.  If a call raises an exception the next entry is tried
+    after a short delay.  Only when every entry has failed is the *last*
+    exception re-raised.
+
+    Args:
+        task: Auxiliary task name ( forwarded as ``task`` to call_llm).
+        messages: Chat messages list.
+        temperature: Sampling temperature.
+        max_tokens: Max output tokens.
+        tools: Tool definitions.
+        timeout: Per-request timeout.
+        extra_body: Extra request body fields.
+        main_runtime: Optional main runtime info dict.
+        failover_delay: Seconds to wait between failed attempts (default 2).
+
+    Returns:
+        Response object from the first successful call_llm invocation.
+
+    Raises:
+        RuntimeError: If the failover chain is empty or all entries fail.
+    """
+    chain = _read_failover_chain()
+    if not chain:
+        raise RuntimeError(
+            "Provider is set to 'failover' but auxiliary.failover_chain is "
+            "empty or missing in config.yaml.  Add a list of "
+            "{provider, model} entries under auxiliary.failover_chain."
+        )
+
+    last_exc: Optional[Exception] = None
+    for idx, entry in enumerate(chain):
+        prov = entry["provider"]
+        mdl = entry.get("model") or None
+        base = entry.get("base_url") or None
+        key = entry.get("api_key") or None
+        try:
+            logger.info(
+                "Failover %s: attempt %d/%d — provider=%s model=%s",
+                task or "call", idx + 1, len(chain), prov, mdl or "default",
+            )
+            return call_llm(
+                task=task,
+                provider=prov,
+                model=mdl,
+                base_url=base,
+                api_key=key,
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                tools=tools,
+                timeout=timeout,
+                extra_body=extra_body,
+                main_runtime=main_runtime,
+            )
+        except Exception as exc:
+            last_exc = exc
+            logger.warning(
+                "Failover %s: provider=%s model=%s failed (%s: %s)",
+                task or "call", prov, mdl or "default",
+                type(exc).__name__, exc,
+            )
+            if idx < len(chain) - 1:
+                time.sleep(failover_delay)
+
+    # All entries exhausted — raise the last exception.
+    if last_exc is not None:
+        raise last_exc
+    # Should be unreachable, but just in case.
+    raise RuntimeError("Failover chain exhausted with no recorded error.")
 
 
 def extract_content_or_reasoning(response) -> str:
