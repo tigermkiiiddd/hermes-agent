@@ -5767,6 +5767,11 @@ class AIAgent:
             # attempt's start, not a previous attempt's last chunk.
             last_chunk_time["t"] = time.time()
             self._touch_activity("waiting for provider response (streaming)")
+            # Immediate feedback so the user knows we're waiting for the
+            # model — not frozen.  The gap between "user presses enter"
+            # and "first chunk arrives" can be 30-180s.
+            _stream_model = stream_kwargs.get("model", self.model or "unknown")
+            self._emit_status(f"正在等待 {_stream_model} 响应...")
             stream = request_client_holder["client"].chat.completions.create(**stream_kwargs)
 
             # Capture rate limit headers from the initial HTTP response.
